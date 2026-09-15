@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import (
-    Column, String, Integer, Float, Boolean, Text, DateTime, Date,
+    Column, String, Integer, Float, Boolean, Text, DateTime, Date, LargeBinary,
     ForeignKey, JSON, Index, UniqueConstraint, create_engine, text
 )
 from sqlalchemy.dialects.postgresql import UUID
@@ -305,6 +305,11 @@ class Application(Base):
     last_email_received = Column(DateTime(timezone=True), nullable=True)
     last_email_snippet = Column(Text, nullable=True)
     status_transitions = Column(JSON, default=[])  # [{from, to, at, source}]
+    # What was actually sent: the accepted résumé version, the Role Match at the
+    # time, and every answer autofill put in the form (so an application can be reproduced).
+    resume_version_id = Column(UUID(as_uuid=True), nullable=True)
+    match_score_at_apply = Column(Float, nullable=True)
+    answers_used = Column(JSON, nullable=True)
     updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
     job = relationship("Job", back_populates="applications")
@@ -506,6 +511,104 @@ class Persona(Base):
     qa_bank = Column(JSON, default=list)
     created_at = Column(DateTime(timezone=True), default=utcnow)
     updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+# ── Candidate facts ──────────────────────────────────────────────────────────
+# The source of truth for résumé content: one row per factual career item, far
+# more than fits on a page. Every generated claim cites these rows by provenance
+# id ("experience_7", "achievement_12"); see backend/copilot/facts.py for the
+# per-kind schema. Imported rows start unverified and feed nothing until the
+# user verifies them. Contact/identity answers stay on Persona.
+class CandidateFact(Base):
+    __tablename__ = "candidate_facts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    kind = Column(String(24), nullable=False, index=True)
+    # achievement -> the experience/project/research it happened in
+    parent_id = Column(Integer, ForeignKey("candidate_facts.id", ondelete="CASCADE"), nullable=True, index=True)
+    data = Column(JSON, nullable=False, default=dict)
+    verified = Column(Boolean, nullable=False, default=False)
+    source = Column(String, nullable=False, default="manual")   # manual | gap | import:<label>
+    sort_order = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    children = relationship("CandidateFact", cascade="all, delete-orphan",
+                            backref=backref("parent", remote_side=[id]))
+
+
+# ── Job analysis / Role Match ────────────────────────────────────────────────
+# `analysis` is the LLM's structured extraction (schemas.JobAnalysis) and never
+# changes once written; `evidence`/`match` are recomputed whenever the profile
+# changes. A résumé version snapshots both, so an old application stays reproducible.
+class JobAnalysisRecord(Base):
+    __tablename__ = "job_analyses"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    job_id = Column(UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+    jd_hash = Column(String(64), nullable=True)
+    provider = Column(String, nullable=True)
+    model = Column(String, nullable=True)
+    analysis = Column(JSON, nullable=False)
+    evidence = Column(JSON, nullable=True)
+    match = Column(JSON, nullable=True)
+    profile_version = Column(String(16), nullable=True)
+    matched_at = Column(DateTime(timezone=True), nullable=True)
+
+
+# ── Résumé versions ──────────────────────────────────────────────────────────
+# One generated résumé: structured JSON with per-bullet provenance, its audit,
+# LaTeX source and PDF, plus everything needed to reproduce it. A draft is edited
+# through review; once accepted the row is immutable (see the listener below),
+# and only accepted versions are ever uploaded by autofill.
+class ResumeVersion(Base):
+    __tablename__ = "resume_versions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    job_id = Column(UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True, index=True)
+    kind = Column(String, nullable=False, default="tailored")     # base | tailored
+    status = Column(String, nullable=False, default="draft")      # draft | accepted | rejected
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+    accepted_at = Column(DateTime(timezone=True), nullable=True)
+    template = Column(String, nullable=False, default="default")
+    template_version = Column(String(16), nullable=True)
+    candidate_profile_version = Column(String(16), nullable=True)
+    job_analysis_id = Column(Integer, nullable=True)
+    job_analysis = Column(JSON, nullable=True)   # snapshot: analysis + evidence + match at generation time
+    base_version_id = Column(UUID(as_uuid=True), nullable=True)
+    provider = Column(String, nullable=True)
+    model = Column(String, nullable=True)
+    resume_json = Column(JSON, nullable=False)
+    audit = Column(JSON, nullable=True)
+    latex = deferred(Column(Text, nullable=True))
+    pdf = deferred(Column(LargeBinary, nullable=True))
+    pages = Column(Integer, nullable=True)
+    compile_log = Column(Text, nullable=True)
+    parser_health = Column(JSON, nullable=True)
+    output_dir = Column(String, nullable=True)
+
+
+class ImmutableVersionError(ValueError):
+    pass
+
+
+def _stored_status(connection, target):
+    # the row as the database holds it before this flush, not the (possibly expired) instance
+    from sqlalchemy import select
+    return connection.execute(select(ResumeVersion.__table__.c.status).where(ResumeVersion.__table__.c.id == target.id)).scalar()
+
+
+@event.listens_for(ResumeVersion, "before_update")
+def _accepted_versions_are_immutable(mapper, connection, target):
+    if _stored_status(connection, target) == "accepted":
+        raise ImmutableVersionError("accepted résumé versions are immutable; generate a new version instead")
+
+
+@event.listens_for(ResumeVersion, "before_delete")
+def _accepted_versions_are_kept(mapper, connection, target):
+    if _stored_status(connection, target) == "accepted":
+        raise ImmutableVersionError("accepted résumé versions cannot be deleted")
 
 
 # ── Tracer Links ───────────────────────────────────────────────────────────

@@ -26,6 +26,10 @@ import CoverLetters from './screens/CoverLetters'
 import CoverLetterEditor from './screens/CoverLetterEditor'
 import Settings from './screens/Settings'
 import Persona from './screens/Persona'
+import Profile from './screens/Profile'
+import JobDetail from './screens/JobDetail'
+import AnswerBank from './screens/AnswerBank'
+import Dashboard from './screens/Dashboard'
 import Stats from './screens/Stats'
 import axios from 'axios'
 import { useTheme } from './theme'
@@ -242,6 +246,10 @@ function App() {
           <Route path="cover-letters/:id" element={<CoverLetterEditor />} />
           <Route path="settings" element={<Settings />} />
           <Route path="persona" element={<Persona />} />
+          <Route path="profile" element={<Profile />} />
+          <Route path="jobs/:id" element={<JobDetail />} />
+          <Route path="answer-bank" element={<AnswerBank />} />
+          <Route path="dashboard" element={<Dashboard />} />
           <Route path="stats" element={<Stats />} />
         </Route>
         {/* labRoute returns null when design-base/ is absent; React skips a null child. */}

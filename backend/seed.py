@@ -42,8 +42,24 @@ DEFAULT_SETTINGS = {
     "scoring_rubric": ("Score each resume using these criteria (each 0-20, sum to 0-100):\n1. SKILLS MATCH (weight: 20): How many required technical skills/tools does the candidate have?\n2. EXPERIENCE LEVEL (weight: 20): Does seniority/years match? (entry-level resume for senior role = low)\n3. DOMAIN FIT (weight: 20): Has the candidate worked in the same industry/domain?\n4. ROLE ALIGNMENT (weight: 20): Does the candidate's career trajectory match this role type?\n5. REQUIREMENTS MET (weight: 20): Does the candidate meet stated requirements (education, certs, clearance)?\n\nUse the FULL 0-100 range. 90+ = perfect match. 50-70 = decent with gaps. Below 30 = poor match.\nAvoid clustering scores — differentiate meaningfully between resumes and jobs.", "Editable resume scoring rubric"),
     "scoring_output_light": ('Return ONLY this JSON:\n{\n  "scores": {CV_NAMES_HERE: 0-100},\n  "best_cv": "CV_NAME"\n}', "Light scoring output schema"),
     "scoring_output_full": ('Return ONLY this JSON:\n{\n  "scores": {CV_NAMES_HERE: 0-100},\n  "best_cv": "CV_NAME",\n  "breakdown": {"skills": 0-20, "experience": 0-20, "domain": 0-20, "role": 0-20, "requirements": 0-20},\n  "summary": "2-3 sentence assessment of candidate-job fit",\n  "requirement_mapping": [\n    {"requirement": "JD requirement text", "cv_match": "matching CV line or null", "matched": true/false, "severity": "required or preferred"}\n  ],\n  "keyword_coverage_pct": 0-100,\n  "matched_keywords": ["keyword1", "keyword2"],\n  "missing_keywords": ["keyword3", "keyword4"],\n  "hard_blockers": ["blocker if any"],\n  "ats_tip": "one actionable ATS optimization suggestion"\n}', "Full scoring output schema with keyword analysis"),
-    "llm_provider": ("claude_api", "LLM provider: claude_api, claude_code, codex_cli, openai, ollama, openrouter"),
-    "llm_model": ("claude-sonnet-5", "LLM model name"),
+    "llm_provider": ("ollama", "LLM provider: ollama (local, default), claude_api, claude_code, codex_cli, openai, openrouter"),
+    "llm_model": ("", "LLM model name (required; for Ollama, a model you have pulled)"),
+    "ollama_base_url": ("", "Ollama endpoint. Empty = OLLAMA_BASE_URL env, else http://localhost:11434"),
+    "copilot_llm_provider": ("", "Provider for job analysis, evidence matching, résumé writing and audit (empty = Primary)"),
+    "copilot_llm_model": ("", "Model for job analysis / résumé pipeline (empty = Primary)"),
+    "copilot_llm_api_key": ("", "API key for the copilot provider override"),
+    "role_match_weights": (json.dumps({"eligibility": 30, "required": 30, "preferred": 10, "experience": 15, "technology": 10, "parser_health": 5}),
+                           "Role Match component weights (JSON). Components with nothing to measure are left out and the rest re-weighted."),
+    "role_match_min_recommended": ("70", "Role Match at or above which a job is marked recommended"),
+    "resume_template": ("default", "LaTeX résumé template folder under backend/resume/templates"),
+    "resume_page_target": ("1", "Target résumé length in pages; a longer PDF is flagged"),
+    "resume_project_policy": ("reorder", "Projects on a tailored résumé: keep (as in base), reorder, or replace (pick different projects)"),
+    "resume_skill_ordering": ("relevance", "Skill order: relevance (to the job) or profile (your order)"),
+    "resume_section_order": (json.dumps(["education", "experience", "research", "projects", "skills", "certifications"]),
+                             "Résumé section order (JSON list)"),
+    "autofill_resume_fallback": ("none", "When a job has no accepted résumé: none (upload nothing) or latest (latest accepted résumé)"),
+    "overleaf_mode": ("disabled", "Overleaf integration: disabled, export, or git"),
+    "overleaf_git_remote": ("", "Overleaf Git URL (https://git.overleaf.com/<project id>). The token comes from the OVERLEAF_GIT_TOKEN env var and is never stored"),
     "llm_api_key": ("", "API key for API-backed providers (not needed for subscription CLIs or Ollama)"),
     "llm_fallback_provider": ("", "Fallback LLM provider (empty = no fallback)"),
     "llm_fallback_model": ("", "Fallback model name"),
@@ -372,6 +388,11 @@ ENUM_SETTING_VALUES = {
     "cv_tailor_llm_provider": _LLM_PROVIDERS,
     "cover_letter_llm_provider": _LLM_PROVIDERS,
     "autofill_llm_provider": _LLM_PROVIDERS,
+    "copilot_llm_provider": _LLM_PROVIDERS,
+    "resume_project_policy": {"keep", "reorder", "replace"},
+    "resume_skill_ordering": {"relevance", "profile"},
+    "autofill_resume_fallback": {"none", "latest"},
+    "overleaf_mode": {"disabled", "export", "git"},
     "scoring_default_depth": _DEPTHS,
     "on_save_action": {"off"} | _DEPTHS,
     "tailor_auto_quick_score": {"off", "false", "no", "0", "true", "yes", "1", ""} | _DEPTHS,
@@ -417,6 +438,17 @@ def invalid_setting_values(updates: dict) -> list:
                 problems.append(f"{key}: must be a whole number (got {value!r})")
             elif int(str(value).strip()) < 0:
                 problems.append(f"{key}: must not be negative (got {value!r})")
+            continue
+        if key == "role_match_weights":
+            try:
+                w = json.loads(value) if isinstance(value, str) else value
+                ok = isinstance(w, dict) and all(
+                    k in ("eligibility", "required", "preferred", "experience", "technology", "parser_health")
+                    and isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0 for k, v in w.items())
+            except ValueError:
+                ok = False
+            if not ok:
+                problems.append(f"{key}: must be a JSON object of component -> non-negative number")
             continue
         if key.endswith("_cron"):
             if not isinstance(value, str):
@@ -539,6 +571,9 @@ def run_migrations(db):
         "ALTER TABLE companies ALTER COLUMN tier DROP NOT NULL",
         "ALTER TABLE companies ALTER COLUMN tier SET DEFAULT NULL",
         "ALTER TABLE jobs DROP COLUMN IF EXISTS language_flag",
+        "ALTER TABLE applications ADD COLUMN IF NOT EXISTS resume_version_id UUID",
+        "ALTER TABLE applications ADD COLUMN IF NOT EXISTS match_score_at_apply DOUBLE PRECISION",
+        "ALTER TABLE applications ADD COLUMN IF NOT EXISTS answers_used JSON",
         "ALTER TABLE jobs DROP COLUMN IF EXISTS language_snippet",
         "ALTER TABLE searches ADD COLUMN IF NOT EXISTS require_salary BOOLEAN DEFAULT FALSE",
         "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS scoring_report JSONB",

@@ -267,7 +267,7 @@ async def send_digest():
             Job.discovered_at >= yesterday_start,
         ).filter(sa_text(STRONG_MATCH_SQL).bindparams(threshold=threshold)).count()
 
-        active_statuses = ["applied", "interview"]
+        active_statuses = ["applied", "oa", "recruiter_screen", "interview", "final"]
         active_apps = db.query(Application).filter(Application.status.in_(active_statuses)).count()
 
         responses = db.query(Application).filter(

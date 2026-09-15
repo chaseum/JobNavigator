@@ -11,7 +11,7 @@ from backend.tests.r4_support import (  # noqa: F401
     make_job, big_string, EMOJI, MISSING_UUID,
 )
 
-VALID = ["applied", "interview", "offer", "rejected"]
+VALID = ["saved", "analyzed", "resume_drafted", "ready_to_apply", "applied", "oa", "recruiter_screen", "interview", "final", "offer", "rejected", "withdrawn"]
 
 
 def _create(client, **kw):

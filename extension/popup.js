@@ -231,9 +231,40 @@ async function doSend() {
     }
     state.filterReason = '';
     state.send = 'sent'; render();
+    if (data && data.id) showMatch(data.id);
     clearTimeout(_sendT); _sendT = setTimeout(() => { state.send = 'idle'; render(); }, 1800);
   } catch { state.send = 'error'; state.lastError = 'send'; render(); }
 }
+// Role Match for the job just saved: analyze it if it has not been, then poll the workspace.
+// The score is evidence coverage from your verified profile, not the employer's ATS score.
+async function showMatch(jobId) {
+  const card = $('matchCard'), score = $('matchScore'), body = $('matchBody');
+  const headers = { 'Content-Type': 'application/json', 'X-API-Key': state.apiKey };
+  const api = (path, opts) => fetch(`${state.serverUrl}/api${path}`, { headers, ...opts }).then(r => r.json().then(d => ({ ok: r.ok, d })));
+  card.classList.remove('hide'); card.style.display = 'flex';
+  score.textContent = '…'; body.textContent = 'Analyzing the posting against your verified profile…';
+  $('matchOpen').onclick = () => chrome.tabs.create({ url: `${state.serverUrl}/jobs/${jobId}` });
+  try {
+    let { d } = await api(`/copilot/jobs/${jobId}`);
+    if (!d.analysis && !(d.running || []).length) {
+      const started = await api(`/copilot/jobs/${jobId}/analyze`, { method: 'POST' });
+      if (!started.ok && started.d && started.d.detail && !/already running/.test(started.d.detail)) { score.textContent = '—'; body.textContent = started.d.detail; return; }
+    }
+    for (let i = 0; i < 100; i++) {
+      ({ d } = await api(`/copilot/jobs/${jobId}`));
+      if (d.match && !(d.running || []).length) break;
+      await new Promise(r => setTimeout(r, 3000));
+    }
+    if (!d.match) { score.textContent = '—'; body.textContent = 'Still working — open the workspace to follow it.'; return; }
+    score.textContent = String(d.match.score);
+    const c = d.match.counts || {};
+    const missing = (d.requirements || []).filter(r => r.status === 'MISSING').slice(0, 3).map(r => r.text);
+    body.textContent = `${c.MATCHED || 0} matched · ${c.PARTIAL || 0} partial · ${c.MISSING || 0} missing · ${c.UNKNOWN || 0} unclear`
+      + (missing.length ? ` — missing: ${missing.join('; ')}` : '')
+      + ((d.match.hard_blockers || []).length ? ' — hard requirement not met' : '');
+  } catch { score.textContent = '—'; body.textContent = "Couldn't load the match."; }
+}
+
 async function doApplied() {
   if (state.applied === 'saving') return;
   const title = $('title').value.trim(), company = $('company').value.trim(), url = state.url.trim();

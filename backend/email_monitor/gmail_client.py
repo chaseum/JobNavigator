@@ -131,7 +131,7 @@ def _build_gmail_query(db) -> str:
 
 def _get_active_apps_for_llm(db) -> list:
     """Build numbered list of active applications for LLM prompt."""
-    active_statuses = ["applied", "interview"]
+    active_statuses = ["applied", "oa", "recruiter_screen", "interview", "final"]
     apps = db.query(Application).filter(Application.status.in_(active_statuses)).all()
     result = []
     for i, app in enumerate(apps, 1):
@@ -180,7 +180,8 @@ def _apply_llm_result_to_app(db, matched_app, llm_result: dict, body: str, subje
     new_status = llm_result["status"]
 
     # Only transition forward, never backward
-    status_order = {"applied": 0, "interview": 1, "offer": 2, "rejected": 99}
+    status_order = {"ready_to_apply": -1, "applied": 0, "oa": 1, "recruiter_screen": 1, "interview": 2, "final": 3,
+                    "offer": 4, "rejected": 99, "withdrawn": 99}
     current_rank = status_order.get(matched_app.status, -1)
     new_rank = status_order.get(new_status, -1)
 
@@ -419,7 +420,7 @@ def _email_matches_company(company: str, from_header: str, subject: str,
 def _match_email_to_application(db, from_header: str, subject: str, body: str, sender_domain: str):
     """Match an email to an active application anchored on the sender; a body-only company
     match is used only as a fallback after every app is checked for a stronger sender match."""
-    active_statuses = ["applied", "interview"]
+    active_statuses = ["applied", "oa", "recruiter_screen", "interview", "final"]
     apps = db.query(Application).filter(Application.status.in_(active_statuses)).all()
 
     body_lower = (body or "").lower()

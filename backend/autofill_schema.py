@@ -43,15 +43,29 @@ ANSWER_SCHEMA = {
     "github": {"node": "contact", "kind": "text"},
     "portfolio": {"node": "contact", "kind": "text"},
     "current_company": {"node": "contact", "kind": "text"},
+    "preferred_name": {"node": "contact", "kind": "text"},
+    "website": {"node": "contact", "kind": "text"},
     # Screening defaults (persona.preferences / persona.compensation)
     "willing_to_relocate": {"node": "preferences", "kind": "bool"},
     "willing_remote": {"node": "preferences", "kind": "bool"},
+    "remote_preference": {"node": "preferences", "kind": "enum",
+                          "enum": ["remote", "hybrid", "onsite", "any"]},
+    "desired_locations": {"node": "preferences", "kind": "text"},
     "notice_period": {"node": "preferences", "kind": "text"},
     "earliest_start": {"node": "preferences", "kind": "text"},
     "referral_source": {"node": "preferences", "kind": "text"},
     "how_did_you_hear": {"node": "preferences", "kind": "text"},
     "desired_salary": {"node": "compensation", "kind": "text"},
 }
+
+
+# Answers a model must never produce: they come verbatim from the user's own
+# profile answers, or the field stays empty for the user to fill.
+PROTECTED_KEYS = frozenset({
+    "authorized_us", "requires_sponsorship_now", "requires_sponsorship_future", "over_18", "work_auth_type",
+    "gender", "race_ethnicity", "veteran_status", "hispanic_latino", "disability_status", "age_range",
+    "transgender", "sexual_orientation", "decline_demographics", "desired_salary",
+})
 
 
 # Demographic self-ID enum fields. When persona's `decline_demographics` flag is set, every one

@@ -7,8 +7,11 @@ from backend.models.db import SessionLocal, Setting
 logger = logging.getLogger("jobnavigator.llm")
 
 
-DEFAULT_PROVIDER = "claude_api"
-DEFAULT_MODEL = "claude-sonnet-5"
+# Local-first: candidate data stays on this machine unless the user picks a
+# remote provider. No model is assumed; an empty model is a configuration error.
+DEFAULT_PROVIDER = "ollama"
+DEFAULT_MODEL = ""
+DEFAULT_OLLAMA_URL = "http://localhost:11434"
 
 
 def _get_setting(db, key, default=""):
@@ -442,20 +445,35 @@ async def _call_openai(prompt: str, system: str, model: str, api_key: str, max_t
     }
 
 
-async def _call_ollama(prompt: str, system: str, model: str, max_tokens: int) -> dict:
-    """Call local Ollama instance. Returns {text, usage}."""
+def ollama_base_url(db=None) -> str:
+    """Settings > env OLLAMA_BASE_URL > localhost. Docker sets the env to host.docker.internal."""
+    import os
+    own = db is None
+    db = db or SessionLocal()
+    try:
+        url = _get_setting(db, "ollama_base_url", "")
+    except Exception:
+        url = ""
+    finally:
+        if own:
+            db.close()
+    return (url or os.getenv("OLLAMA_BASE_URL") or DEFAULT_OLLAMA_URL).rstrip("/")
+
+
+async def _call_ollama(prompt: str, system: str, model: str, max_tokens: int,
+                       fmt: dict | None = None, temperature: float | None = None) -> dict:
+    """Call the local Ollama instance; `fmt` is a JSON schema that constrains decoding. Returns {text, usage}."""
     import httpx
-    async with httpx.AsyncClient(timeout=120) as client:
-        response = await client.post(
-            "http://localhost:11434/api/generate",
-            json={
-                "model": model,
-                "prompt": prompt,
-                "system": system,
-                "stream": False,
-                "options": {"num_predict": max_tokens},
-            },
-        )
+    if not model:
+        raise NonRetryableLLMError("No Ollama model configured — pick one in Settings › AI")
+    options = {"num_predict": max_tokens}
+    if temperature is not None:
+        options["temperature"] = temperature
+    body = {"model": model, "prompt": prompt, "system": system, "stream": False, "options": options}
+    if fmt is not None:
+        body["format"] = fmt
+    async with httpx.AsyncClient(timeout=600) as client:
+        response = await client.post(f"{ollama_base_url()}/api/generate", json=body)
         response.raise_for_status()
         data = response.json()
     return {
@@ -467,3 +485,87 @@ async def _call_ollama(prompt: str, system: str, model: str, max_tokens: int) ->
             "cache_write_tokens": 0,
         },
     }
+
+
+# ── Structured output ────────────────────────────────────────────────────────
+
+class StructuredOutputError(RuntimeError):
+    """The model answered, but not with an object the schema accepts."""
+
+
+REMOTE_PROVIDERS = {"claude_api", "claude_code", "codex_cli", "openai", "openrouter"}
+
+
+def _json_from_text(text: str):
+    """The JSON object a text-only provider returned; tolerates a code fence, never scrapes prose."""
+    import json as _json
+    t = (text or "").strip()
+    if t.startswith("```"):
+        t = t.split("\n", 1)[1] if "\n" in t else ""
+        t = t.rsplit("```", 1)[0]
+    try:
+        return _json.loads(t)
+    except ValueError as e:
+        raise StructuredOutputError(f"model did not return JSON: {e}") from None
+
+
+async def call_structured(schema, prompt: str, system: str, feature: str = "",
+                          max_tokens: int = 3000, temperature: float = 0.0, job_id=None):
+    """Schema-constrained completion validated into `schema` (a pydantic model); returns (instance, provider, model).
+
+    Constrained decoding where the provider has it: Ollama `format`, OpenAI
+    `json_schema`, a forced Claude tool call. The subscription CLIs only take text,
+    so their reply is parsed as JSON and validated like the rest. Deliberately no
+    fallback provider: a silent hop from a local model to a cloud one would send
+    the candidate's profile somewhere the user never chose.
+    """
+    import json as _json
+    from pydantic import ValidationError
+    from backend.analyzer.llm_logger import track_llm_call
+
+    cfg = resolve_llm_config(feature)
+    provider, model, api_key = cfg["provider"], cfg["model"], cfg["api_key"]
+    json_schema = schema.model_json_schema()
+    last_err = None
+    for attempt in (1, 2):
+        async with track_llm_call(feature or "structured", provider, model, job_id=job_id) as tracker:
+            if provider == "ollama":
+                res = await _call_ollama(prompt, system, model, max_tokens, fmt=json_schema, temperature=temperature)
+                obj = _json_from_text(res["text"])
+            elif provider in ("openai", "openrouter"):
+                client = _openai_client(api_key, OPENROUTER_BASE_URL if provider == "openrouter" else None)
+                r = await client.chat.completions.create(
+                    model=model, max_tokens=max_tokens,
+                    messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+                    response_format={"type": "json_schema", "json_schema": {"name": schema.__name__, "schema": json_schema}},
+                )
+                res = {"text": r.choices[0].message.content or "", "usage": {
+                    "input_tokens": getattr(r.usage, "prompt_tokens", 0), "output_tokens": getattr(r.usage, "completion_tokens", 0),
+                    "cache_read_tokens": 0, "cache_write_tokens": 0}}
+                obj = _json_from_text(res["text"])
+            elif provider == "claude_api":
+                import anthropic, os
+                client = anthropic.AsyncAnthropic(api_key=api_key or os.getenv("ANTHROPIC_API_KEY", ""))
+                r = await client.messages.create(
+                    model=model, max_tokens=max_tokens, system=system,
+                    messages=[{"role": "user", "content": prompt}],
+                    tools=[{"name": "submit", "description": f"Submit the {schema.__name__}", "input_schema": json_schema}],
+                    tool_choice={"type": "tool", "name": "submit"},
+                )
+                block = next((b for b in r.content if getattr(b, "type", "") == "tool_use"), None)
+                obj = getattr(block, "input", None)
+                res = {"text": "", "usage": {"input_tokens": getattr(r.usage, "input_tokens", 0),
+                                              "output_tokens": getattr(r.usage, "output_tokens", 0),
+                                              "cache_read_tokens": 0, "cache_write_tokens": 0}}
+            else:
+                text_prompt = (f"{prompt}\n\nReturn ONLY a JSON object matching this JSON schema, no prose:\n"
+                               f"{_json.dumps(json_schema)}")
+                res = await _dispatch(provider, model, api_key, text_prompt, system, max_tokens)
+                obj = _json_from_text(res["text"])
+            tracker.record({**res, "provider": provider, "model": model})
+        try:
+            return schema.model_validate(obj), provider, model
+        except ValidationError as e:
+            last_err = StructuredOutputError(f"{schema.__name__} failed validation: {e.errors()[:3]}")
+            logger.warning(f"structured output attempt {attempt}: {last_err}")
+    raise last_err

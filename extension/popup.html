@@ -234,6 +234,15 @@
         <div class="btn btn-sending hide" id="btnSending"><div class="spin"></div><div>Sending…</div></div>
         <div class="btn btn-green hide" id="btnSent"><div class="check"></div><div>Sent to job feed</div></div>
         <button class="btn btn-retry hide" id="btnRetry">Retry send</button>
+        <div class="card hide" id="matchCard" style="flex-direction:column; gap:6px; padding:11px">
+          <div style="display:flex; align-items:center; gap:8px">
+            <b class="mono" id="matchScore" style="font-size:18px">…</b>
+            <span id="matchHd" style="font-size:12.5px; font-weight:600">Role Match</span>
+            <span class="grow"></span>
+            <span class="hdr-link" id="matchOpen">Open workspace ↗</span>
+          </div>
+          <div id="matchBody" style="font-size:12px; line-height:1.45; color:var(--ink2)"></div>
+        </div>
 
         <div class="row2">
           <button class="btn-sm" id="btnApplied">Save as applied</button>

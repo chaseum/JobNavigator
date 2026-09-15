@@ -1,0 +1,38 @@
+((= Rendered by backend/copilot/latex.py. Delimiters: ((* block *)), ((( variable ))). Every variable is LaTeX-escaped. =))
+\documentclass[10pt,letterpaper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=0.55in]{geometry}
+\usepackage[hidelinks]{hyperref}
+\input{glyphtounicode}
+\pdfgentounicode=1
+\input{macros}
+\pagestyle{empty}
+\setlength{\parindent}{0pt}
+
+\begin{document}
+
+\resumeheader{((( header.name )))}{((* for c in header.contact *))((* if not loop.first *)) \textbar{} ((* endif *))((* if c.url *))\href{((( c.url|url )))}{((( c.text )))}((* else *))((( c.text )))((* endif *))((* endfor *))}
+((* for s in sections *))
+
+\resumesection{((( s.title )))}
+((* if s.lines is defined *))
+((* for line in s.lines *))
+\resumeskills{((( line.label )))}{((( line["items"]|join(", ") )))}
+((* endfor *))
+((* else *))
+((* for e in s.entries *))
+\resumeentry{((( e.heading )))}{((( e.subheading )))}{((( e.location )))}{((( e.date )))}
+((* if e.bullets *))
+\begin{resumebullets}
+((* for b in e.bullets *))
+  \item ((( b.text )))
+((* endfor *))
+\end{resumebullets}
+((* endif *))
+((* endfor *))
+((* endif *))
+((* endfor *))
+
+\end{document}

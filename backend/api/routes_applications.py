@@ -12,7 +12,12 @@ logger = logging.getLogger("jobnavigator.applications")
 router = APIRouter(prefix="/applications", tags=["applications"])
 
 
-VALID_STATUSES = {"applied", "interview", "offer", "rejected"}
+# Pipeline order. The first four precede submission: autofill creates the row at
+# ready_to_apply, and "Save as applied" moves it on rather than refusing a duplicate.
+APPLICATION_STAGES = ["saved", "analyzed", "resume_drafted", "ready_to_apply", "applied", "oa",
+                      "recruiter_screen", "interview", "final", "offer", "rejected", "withdrawn"]
+PRE_APPLY_STAGES = {"saved", "analyzed", "resume_drafted", "ready_to_apply"}
+VALID_STATUSES = set(APPLICATION_STAGES)
 
 
 def _parse_dt(value):
@@ -285,6 +290,11 @@ def create_application(
     external_id = make_external_id(data.company, data.title, data.url)
 
     job = db.query(Job).filter(Job.external_id == external_id).first()
+    if not job and data.url:
+        # the posting may already be saved under a slightly different company/title
+        # (the popup reads them off the page); the URL still identifies it
+        from backend.api.routes_autofill import match_job
+        job = match_job(db, data.url)
     if not job:
         job = Job(
             external_id=external_id,
@@ -321,6 +331,14 @@ def create_application(
             logger.info("ignoring unparseable applied_at %r", data.applied_at)
 
     app = db.query(Application).filter(Application.job_id == job.id).first()
+    if app and app.status in PRE_APPLY_STAGES and new_status not in PRE_APPLY_STAGES:
+        # autofill prepared this application; the user has now submitted it
+        record_transition(app, new_status, "ui")
+        app.applied_at = applied_at or utcnow()
+        if data.notes and not app.notes:
+            app.notes = data.notes
+        db.commit()
+        return {"id": str(app.id), "job_id": str(job.id), "status": app.status, "company": job.company, "title": job.title}
     if app:
         # Refuse a second log for the same posting — it would silently overwrite
         # notes and reset the stage, creating a bogus funnel edge.
@@ -793,6 +811,9 @@ def _app_to_dict(a: Application, lookup=None, tailored=None, has_cover_letter=Fa
         "last_email_received": a.last_email_received.isoformat() if a.last_email_received else None,
         "last_email_snippet": a.last_email_snippet,
         "status_transitions": a.status_transitions or [],
+        "resume_version_id": str(a.resume_version_id) if a.resume_version_id else None,
+        "match_score_at_apply": a.match_score_at_apply,
+        "answers_used": a.answers_used or [],
         "updated_at": a.updated_at.isoformat() if a.updated_at else None,
         "company": raw,
         "company_canonical": canonical_co.name if canonical_co else raw,

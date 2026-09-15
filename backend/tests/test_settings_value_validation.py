@@ -27,7 +27,7 @@ needs_apscheduler = pytest.mark.skipif(
 
 # ── the derived key sets ────────────────────────────────────────────────────
 
-def test_int_keys_match_the_nine_rows_settings_marks_int():
+def test_int_keys_match_the_rows_settings_marks_int():
     """Derived from the seeded defaults; must equal what Settings.jsx types as numeric."""
     assert INT_SETTING_KEYS == {
         "fit_score_threshold",
@@ -39,6 +39,8 @@ def test_int_keys_match_the_nine_rows_settings_marks_int():
         "tailoring_max_concurrent",
         "email_llm_confidence_threshold",
         "autofill_default_length",
+        "role_match_min_recommended",
+        "resume_page_target",
     }
 
 

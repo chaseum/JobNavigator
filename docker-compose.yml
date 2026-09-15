@@ -35,6 +35,10 @@ services:
     environment:
       DATABASE_URL: postgresql://jobnavigator:${POSTGRES_PASSWORD:-password}@db:5432/jobnavigator
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
+      # Ollama runs on the host; the container reaches it through host-gateway.
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "127.0.0.1:8000:8000"   # everything external goes through Caddy on :80; the raw API stays on loopback
     depends_on:
@@ -43,6 +47,7 @@ services:
     volumes:
       - ./backend:/app/backend
       - ./backups:/app/backups
+      - ./generated:/app/generated
       - ./backend/.linkedin_api:/root/.linkedin_api
       - codex_auth:/root/.codex
 

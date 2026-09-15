@@ -7,7 +7,7 @@ from fastapi.responses import StreamingResponse
 from backend.models.db import SessionLocal, Setting, Persona
 from backend.analyzer.llm_client import call_autofill_llm, call_autofill_llm_stream
 from backend.analyzer.llm_logger import track_llm_call
-from backend.autofill_schema import ANSWER_SCHEMA, project_answers
+from backend.autofill_schema import ANSWER_SCHEMA, PROTECTED_KEYS, project_answers
 
 logger = logging.getLogger("jobnavigator.autofill")
 router = APIRouter(prefix="/autofill", tags=["autofill"])
@@ -304,6 +304,7 @@ def autofill_config():
             # Mirrors the Persona's "prefer not to answer" checkbox so the extension
             # can decline questions the Persona has no field for at all.
             "decline_self_id": bool((persona.get("demographics") or {}).get("decline_demographics")),
+            "protected_keys": sorted(PROTECTED_KEYS),
         }
     finally:
         db.close()
@@ -384,8 +385,33 @@ def _build_autofill_prompt(body: dict, *, want_provider: bool = False) -> dict:
             "max_chars": max_chars, "provider": provider, "model": model}
 
 
+def _protected_guard(body: dict):
+    """A protected question (authorization, sponsorship, EEO, salary, attestations) never reaches a model.
+
+    Returns the user's own verified Answer Bank answer when there is one; otherwise 422.
+    """
+    from backend.copilot import answer_bank as AB
+    question = (body.get("question") or "").strip() if isinstance(body, dict) else ""
+    intent = AB.classify(question)
+    if not AB.is_protected(intent):
+        return None
+    db = SessionLocal()
+    try:
+        p = db.query(Persona).filter(Persona.id == 1).first()
+        entry, _ = AB.find_answer((p.qa_bank if p else None) or [], question)
+    finally:
+        db.close()
+    if entry:
+        return {"answer": entry["answer"], "trimmed": False, "max_chars": None, "from_bank": entry["id"], "intent": intent}
+    raise HTTPException(422, f"protected: a {intent.replace('_', ' ')} question is never drafted by AI. "
+                             "Answer it yourself; the extension offers to save it to your Answer Bank.")
+
+
 @router.post("/answer")
 async def autofill_answer(body: dict):
+    guarded = _protected_guard(body)
+    if guarded is not None:
+        return guarded
     built = _build_autofill_prompt(body, want_provider=True)
     cached_prefix, suffix = built["cached_prefix"], built["suffix"]
     max_chars = built["max_chars"]
@@ -418,6 +444,21 @@ async def autofill_answer(body: dict):
 @router.post("/answer/stream")
 async def autofill_answer_stream(body: dict):
     """SSE variant of /answer that streams the drafted answer as plain-text chunks (no JSON wrapper) so the extension can render it into the field live, sharing the persona/qa_bank cache prefix with /answer."""
+    sse_headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+    try:
+        guarded = _protected_guard(body)
+    except HTTPException as e:
+        refusal = e.detail
+
+        async def _refuse():
+            yield f"data: {_json.dumps({'error': refusal, 'protected': True})}\n\n"
+        return StreamingResponse(_refuse(), media_type="text/event-stream", headers=sse_headers)
+    if guarded is not None:
+        async def _from_bank():
+            yield f"data: {_json.dumps({'delta': guarded['answer']})}\n\n"
+            yield "data: [DONE]\n\n"
+        return StreamingResponse(_from_bank(), media_type="text/event-stream", headers=sse_headers)
+
     # Same editable `autofill_prompt` template as /answer, so what the user edits
     # in Settings governs the variant the extension actually streams (R4-T1-22).
     built = _build_autofill_prompt(body)
@@ -462,3 +503,229 @@ async def autofill_answer_stream(body: dict):
 
     return StreamingResponse(_events(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+# ── Application copilot: job context, accepted résumé, Answer Bank, tracking ──
+
+import base64 as _b64
+import re as _re2
+from urllib.parse import parse_qsl, urlsplit
+
+_ID_PARAMS = {"gh_jid", "token", "jobid", "job_id", "jid", "req", "reqid", "requisitionid", "id"}
+
+
+def normalize_job_url(url: str) -> str:
+    """host + path without the apply suffix, keeping only query params that identify the posting."""
+    try:
+        parts = urlsplit((url or "").strip())
+    except ValueError:
+        return ""
+    host = parts.netloc.lower().removeprefix("www.")
+    path = _re2.split(r"/(?:apply|application|applymanually|applywithautofill)(?:/|$)", parts.path, maxsplit=1, flags=_re2.I)[0]
+    keep = sorted((k.lower(), v) for k, v in parse_qsl(parts.query) if k.lower() in _ID_PARAMS and v)
+    return (host + path.rstrip("/")).lower() + ("?" + "&".join(f"{k}={v}" for k, v in keep) if keep else "")
+
+
+def match_job(db, *urls):
+    """The saved job a page belongs to: same normalized URL, the page under the posting, or a shared posting id."""
+    from backend.models.db import Job
+    for url in [u for u in urls if u]:
+        want = normalize_job_url(url)
+        host = want.split("/", 1)[0].split("?", 1)[0]
+        if not host:
+            continue
+        candidates = db.query(Job).filter(Job.url.ilike(f"%{host}%")).order_by(Job.discovered_at.desc()).limit(500).all()
+        best = None
+        for job in candidates:
+            have = normalize_job_url(job.url)
+            if have == want:
+                return job
+            base_want, base_have = want.split("?", 1)[0], have.split("?", 1)[0]
+            if base_want.startswith(base_have + "/") or base_have.startswith(base_want + "/"):
+                best = best or job
+        if best:
+            return best
+    for url in [u for u in urls if u]:
+        try:
+            ids = [v for k, v in parse_qsl(urlsplit(url).query) if k.lower() in ("gh_jid", "token") and v.isdigit()]
+        except ValueError:
+            ids = []
+        for jid in ids:
+            job = db.query(Job).filter(Job.url.ilike(f"%{jid}%")).first()
+            if job:
+                return job
+    return None
+
+
+def _accepted_resume_for(db, job):
+    from backend.copilot.versions import latest_accepted
+    v = latest_accepted(db, job_id=job.id) if job is not None else None
+    if v is None and _setting(db, "autofill_resume_fallback", "none") == "latest":
+        v = latest_accepted(db)
+        return v, v is not None
+    return v, False
+
+
+@router.post("/job-context")
+def job_context(body: dict):
+    """What the extension needs on an application page: the saved job, its accepted résumé, the match, the application."""
+    from backend.copilot.analysis import latest_record
+    from backend.models.db import Application
+    db = SessionLocal()
+    try:
+        job = match_job(db, body.get("url"), body.get("tab_url"))
+        if job is None:
+            return {"job": None, "resume_version": None}
+        version, fallback = _accepted_resume_for(db, job)
+        rec = latest_record(db, job.id)
+        app = db.query(Application).filter(Application.job_id == job.id).first()
+        return {
+            "job": {"id": str(job.id), "title": job.title, "company": job.company, "url": job.url},
+            "resume_version": {"id": str(version.id), "kind": version.kind, "fallback": fallback,
+                               "accepted_at": version.accepted_at.isoformat() if version.accepted_at else None} if version else None,
+            "match_score": ((rec.match or {}).get("score") if rec else None),
+            "application": {"id": str(app.id), "status": app.status} if app else None,
+        }
+    finally:
+        db.close()
+
+
+@router.get("/resume/{version_id}")
+def accepted_resume_pdf(version_id: str):
+    """Only an accepted version is ever handed to autofill for upload."""
+    import uuid as _uuid
+    from sqlalchemy.orm import undefer
+    from backend.models.db import ResumeVersion
+    try:
+        _uuid.UUID(version_id)
+    except ValueError:
+        raise HTTPException(404, "résumé not found")
+    db = SessionLocal()
+    try:
+        v = db.query(ResumeVersion).options(undefer(ResumeVersion.pdf)).filter(ResumeVersion.id == version_id).first()
+        if v is None or v.status != "accepted" or not v.pdf:
+            raise HTTPException(404, "only an accepted résumé with a compiled PDF can be uploaded")
+        p = db.query(Persona).filter(Persona.id == 1).first()
+        c = (p.contact if p else None) or {}
+        name = "_".join(x for x in (c.get("first_name"), c.get("last_name")) if x) or "Resume"
+        return {"filename": f"{_re2.sub(r'[^A-Za-z0-9_-]', '', name)}_Resume.pdf", "base64": _b64.b64encode(v.pdf).decode()}
+    finally:
+        db.close()
+
+
+@router.post("/lookup")
+def lookup_answers(body: dict):
+    """Answer Bank matches for the open questions on a form: {questions: [...]} -> one result per question."""
+    from backend.copilot import answer_bank as AB
+    questions = [str(q)[:500] for q in (body.get("questions") or []) if str(q).strip()][:60]
+    db = SessionLocal()
+    try:
+        p = db.query(Persona).filter(Persona.id == 1).first()
+        bank = (p.qa_bank if p else None) or []
+    finally:
+        db.close()
+    out = []
+    for q in questions:
+        intent = AB.classify(q)
+        entry, how = AB.find_answer(bank, q)
+        out.append({"question": q, "intent": intent, "protected": AB.is_protected(intent), "how": how,
+                    "match": {"id": entry["id"], "answer": entry["answer"], "answer_type": entry["answer_type"]} if entry else None})
+    return {"results": out}
+
+
+@router.post("/filled")
+def record_fill(body: dict):
+    """Autofill finished filling a form: create or update the application at ready_to_apply. Submission stays with the user."""
+    import uuid as _uuid
+    from sqlalchemy.orm.attributes import flag_modified
+    from backend.api.routes_applications import PRE_APPLY_STAGES
+    from backend.copilot import answer_bank as AB
+    from backend.copilot.analysis import latest_record
+    from backend.models.db import Application, Job, ResumeVersion, record_transition, utcnow
+    db = SessionLocal()
+    try:
+        job = None
+        if body.get("job_id"):
+            try:
+                job = db.query(Job).filter(Job.id == _uuid.UUID(str(body["job_id"]))).first()
+            except ValueError:
+                job = None
+        job = job or match_job(db, body.get("url"), body.get("tab_url"))
+        if job is None:
+            raise HTTPException(404, "save this job first to track the application")
+        version = None
+        if body.get("resume_version_id"):
+            try:
+                version = db.get(ResumeVersion, _uuid.UUID(str(body["resume_version_id"])))
+            except ValueError:
+                version = None
+            if version is None or version.status != "accepted":
+                raise HTTPException(400, "only an accepted résumé can be recorded on an application")
+        answers = [
+            {k: str(a.get(k) or "")[:500] for k in ("label", "key", "source", "bank_id", "value")}
+            for a in (body.get("answers_used") or []) if isinstance(a, dict)
+        ][:200]
+        rec = latest_record(db, job.id)
+        score = (rec.match or {}).get("score") if rec else None
+
+        app = db.query(Application).filter(Application.job_id == job.id).first()
+        if app is None:
+            app = Application(job_id=job.id, status="ready_to_apply",
+                              status_transitions=[{"from": None, "to": "ready_to_apply", "at": utcnow().isoformat(), "source": "extension"}])
+            db.add(app)
+        elif app.status in PRE_APPLY_STAGES and app.status != "ready_to_apply":
+            record_transition(app, "ready_to_apply", "extension")
+        if app.status in PRE_APPLY_STAGES:
+            if version is not None:
+                app.resume_version_id = version.id
+            app.match_score_at_apply = score
+            app.answers_used = answers
+            if body.get("ats") and not (app.notes or "").startswith("Filled by extension"):
+                note = f"Filled by extension on {str(body['ats'])[:40]}"
+                app.notes = f"{note}\n{app.notes}" if app.notes else note
+        used = [a["bank_id"] for a in answers if a.get("bank_id")]
+        if used:
+            p = db.query(Persona).filter(Persona.id == 1).first()
+            if p is not None:
+                p.qa_bank = AB.mark_used(p.qa_bank, used)
+                flag_modified(p, "qa_bank")
+        db.commit()
+        return {"application_id": str(app.id), "job_id": str(job.id), "status": app.status,
+                "resume_version_id": str(app.resume_version_id) if app.resume_version_id else None,
+                "match_score_at_apply": app.match_score_at_apply}
+    finally:
+        db.close()
+
+
+_FIELD_KEY_HELP = {k: k.replace("_", " ") for k in ANSWER_SCHEMA} | {"full_name": "full name", "phone_national": "phone without country code"}
+
+
+@router.post("/map-fields")
+async def map_fields(body: dict):
+    """Fallback for labels the deterministic ATS patterns missed. Only normalized labels go to the model, and only keys come back."""
+    from backend.analyzer import llm_client
+    from backend.copilot.schemas import FieldMapping
+    fields = []
+    for f in (body.get("fields") or [])[:40]:
+        if not isinstance(f, dict) or not str(f.get("label") or "").strip():
+            continue
+        fields.append({"id": str(f.get("id"))[:40], "label": " ".join(str(f["label"]).split())[:200],
+                       "kind": str(f.get("kind") or "")[:20],
+                       "options": [str(o)[:80] for o in (f.get("options") or [])[:30]]})
+    if not fields:
+        return {"mappings": []}
+    prompt = ("Map each application form field to one profile key, or null when none fits exactly. "
+              "Do not guess: a field about something not in the key list maps to null.\n\nKEYS:\n"
+              + "\n".join(f"- {k}: {v}" for k, v in _FIELD_KEY_HELP.items())
+              + "\n\nFIELDS:\n" + "\n".join(
+                  f"- id {f['id']} [{f['kind']}] {f['label']}" + (f" (options: {', '.join(f['options'])})" if f["options"] else "")
+                  for f in fields))
+    try:
+        out, _, _ = await llm_client.call_structured(FieldMapping, prompt, "You map form labels to a fixed list of keys.",
+                                                     feature="autofill", max_tokens=1500)
+    except Exception as e:
+        logger.warning(f"map-fields failed: {e}")
+        raise HTTPException(502, "field mapping failed")
+    ids = {f["id"] for f in fields}
+    return {"mappings": [{"field_id": m.field_id, "key": m.key} for m in out.mappings
+                         if m.field_id in ids and m.key in _FIELD_KEY_HELP]}

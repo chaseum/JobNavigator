@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react'
+import ResumeVersionsPanel from './ResumeVersionsPanel'
 import { useNavigate } from 'react-router-dom'
 import api from '../api'
 import '../theme.css'
@@ -156,6 +157,7 @@ export default function V2Resumes() {
       </HeaderRow>
 
       <div className="v2-scroll" style={{ flex: 1, overflow: 'auto', padding: '6px 30px 26px 24px', minHeight: 0, display: 'flex', flexDirection: 'column', gap: searching || showArchived ? 4 : 12 }}>
+        <ResumeVersionsPanel pushToast={pushToast} />
         {/* Shelf keeps its flex:1 container while loading and renders nothing inside —
             avoids a "Loading…" flash or a wrong empty-state before data arrives. */}
         {!ready ? null

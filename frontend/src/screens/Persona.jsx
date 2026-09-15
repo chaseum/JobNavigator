@@ -92,7 +92,7 @@ const UNSET = '__unset__'
 // {"<question>": "<answer>"} maps (expand to one pair per key). Read both, always write canonical, skipping entries with nothing editable.
 const toPairs = (e) => {
   if (!e || typeof e !== 'object' || Array.isArray(e)) return []
-  if ('question' in e || 'answer' in e) return [{ question: e.question == null ? '' : String(e.question), answer: e.answer == null ? '' : String(e.answer) }]
+  if ('question' in e || 'answer' in e) return [{ ...e, question: e.question == null ? '' : String(e.question), answer: e.answer == null ? '' : String(e.answer) }]
   return Object.keys(e).filter((k) => k !== '').map((k) => ({ question: k, answer: String(e[k] ?? '') }))
 }
 
@@ -237,7 +237,7 @@ export default function Persona() {
   // A pair with neither half filled is not an answer (POST /persona/qa-bank rejects it
   // with a 400) — keep it locally so the row stays editable, but leave it out of the PATCH.
   const writeQa = (list) => {
-    const rows = list.map((e) => ({ question: e.question || '', answer: e.answer || '' }))
+    const rows = list.map((e) => ({ ...e, question: e.question || '', answer: e.answer || '' }))   // keep aliases/verified/last_used
     saveNode('qa_bank', rows, rows.filter((e) => e.question.trim() || e.answer.trim()))
   }
   // the removal toast fires up to 5s later, so re-insert into the list as it is

@@ -359,6 +359,168 @@
   let _trigger = 'click';   // set from extension storage in initStructured
   let _els = null, _undoSnapshot = null, _started = false;
 
+  // ── Application copilot ────────────────────────────────────────────────────
+  // After the deterministic fill: attach the job's ACCEPTED résumé, reuse saved
+  // answers, map leftover labels semantically (labels only, keys back), mark every
+  // field that needs the user, and record the application at ready_to_apply.
+  // Nothing here ever clicks submit; the user reviews and submits.
+  const ATS_HOSTS = [['greenhouse', /(^|\.)greenhouse\.io$/], ['lever', /(^|\.)lever\.co$/], ['ashby', /(^|\.)ashbyhq\.com$/],
+    ['workday', /(^|\.)(myworkdayjobs|workday)\.com$/], ['smartrecruiters', /(^|\.)smartrecruiters\.com$/],
+    ['icims', /(^|\.)icims\.com$/], ['taleo', /(^|\.)taleo\.net$/], ['workable', /(^|\.)workable\.com$/]];
+  function detectATS() {
+    const h = location.hostname.toLowerCase();
+    const hit = ATS_HOSTS.find(([, re]) => re.test(h));
+    return hit ? hit[0] : 'generic';
+  }
+  const RESUME_INPUTS = {
+    greenhouse: ['input#resume', 'input[name="resume"]', '#resume_fieldset input[type="file"]'],
+    lever: ['input[name="resume"]', '#resume-upload-input'],
+    ashby: ['[data-field-path="_systemfield_resume"] input[type="file"]'],
+    workday: ['[data-automation-id="file-upload-input-ref"]'],
+    smartrecruiters: ['input[type="file"][data-test*="resume" i]'],
+    icims: ['input[type="file"][name*="resume" i]'],
+    taleo: ['input[type="file"][id*="resume" i]', 'input[type="file"][id*="attach" i]'],
+    workable: ['input[type="file"][data-ui="resume"]', 'input[type="file"][name="resume"]'],
+  };
+  function findResumeInput(ats) {
+    for (const sel of (RESUME_INPUTS[ats] || [])) { const el = document.querySelector(sel); if (el) return el; }
+    return Array.from(document.querySelectorAll('input[type="file"]'))
+      .find(i => { const l = labelText(i); return /r[eé]sum[eé]|\bcv\b/i.test(l) && !/cover/i.test(l); }) || null;
+  }
+  function send(msg) {
+    return new Promise(resolve => chrome.runtime.sendMessage(msg, r => resolve(r || { error: 'no response' })));
+  }
+  function markReview(el, why, tone) {
+    try {
+      el.style.outline = `2px solid ${tone === 'need' ? 'rgba(214,69,52,0.85)' : 'rgba(212,150,20,0.9)'}`;
+      el.style.outlineOffset = '2px';
+      el.title = why;
+    } catch (e) { /* ignore */ }
+  }
+  async function uploadResume(ctx, ats) {
+    if (!ctx || !ctx.resume_version) return null;
+    const input = findResumeInput(ats);
+    if (!input || (input.files && input.files.length)) return null;
+    const r = await send({ type: 'resume_pdf', version_id: ctx.resume_version.id });
+    if (!r || !r.base64) return null;
+    const bytes = Uint8Array.from(atob(r.base64), c => c.charCodeAt(0));
+    const dt = new DataTransfer();
+    dt.items.add(new File([bytes], r.filename || 'resume.pdf', { type: 'application/pdf' }));
+    input.files = dt.files;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    return input;
+  }
+  function pickOption(field, answer) {
+    const M = window.__autofillMatch, want = M.normalizeLabel(answer);
+    if (!want) return -1;
+    const texts = field.optionTexts || [];
+    const exact = texts.findIndex(t => M.normalizeLabel(t) === want);
+    return exact >= 0 ? exact : texts.findIndex(t => { const n = M.normalizeLabel(t); return n && (n.startsWith(want) || want.startsWith(n)); });
+  }
+  // Offer to keep what the user typed for next time.
+  let _saveHost = null;
+  function offerSave(el, question) {
+    const answer = el.tagName === 'SELECT' ? (el.selectedOptions[0] || {}).textContent : el.value;
+    if (!question || !answer || !String(answer).trim()) return;
+    if (!_saveHost) {
+      _saveHost = document.createElement('div');
+      _saveHost.style.cssText = 'position:absolute;z-index:2147483646;';
+      _saveHost.attachShadow({ mode: 'open' }).innerHTML =
+        '<button style="font:600 12px Helvetica,Arial,sans-serif;color:#fff;background:oklch(0.52 0.15 255);border:none;border-radius:999px;padding:6px 11px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.18)">Save answer for future applications</button>';
+      document.documentElement.appendChild(_saveHost);
+    }
+    const btn = _saveHost.shadowRoot.querySelector('button');
+    const r = el.getBoundingClientRect();
+    _saveHost.style.left = `${window.scrollX + r.left}px`;
+    _saveHost.style.top = `${window.scrollY + r.bottom + 4}px`;
+    _saveHost.style.display = 'block';
+    btn.textContent = 'Save answer for future applications';
+    btn.onclick = async () => {
+      const resp = await send({ type: 'autofill_save', question: question.slice(0, 500), answer: String(answer).trim() });
+      btn.textContent = resp && !resp.error ? (resp.merged ? 'Saved (matched an existing question) ✓' : 'Saved ✓') : 'Could not save';
+      setTimeout(() => { _saveHost.style.display = 'none'; }, 1600);
+    };
+    clearTimeout(_saveHost._t);
+    _saveHost._t = setTimeout(() => { _saveHost.style.display = 'none'; }, 9000);
+  }
+  function watchForManualAnswer(field) {
+    const el = field.el;
+    if (el._jnWatch) return;
+    el._jnWatch = true;
+    el.addEventListener('change', () => offerSave(el, field.signature));
+  }
+
+  async function copilotPass(config, plan, result) {
+    const ats = detectATS();
+    const ctx = await send({ type: 'job_context', url: location.href });
+    const job = ctx && !ctx.error ? ctx.job : null;
+    const used = result.filled.map(x => ({
+      label: (x.field && x.field.signature || '').slice(0, 200), key: x.key, source: 'profile',
+      value: (config.protected_keys || []).includes(x.key) ? '' : String(x.value || ''),
+    }));
+    let resumeVersionId = null;
+    if (job) {
+      const input = await uploadResume(ctx, ats);
+      if (input) { resumeVersionId = ctx.resume_version.id; tintField(input); used.push({ label: 'Résumé', key: 'resume', source: 'accepted_resume' }); }
+      else if (!ctx.resume_version) { const fi = findResumeInput(ats); if (fi) markReview(fi, 'No accepted résumé for this job yet — accept one in JobNavigator, or attach a file yourself', 'need'); }
+    }
+    result.flagged.forEach(x => markReview(x.el, 'Needs your review: ' + (x.reason || 'not filled'), 'need'));
+
+    const planned = new Set(plan.map(p => p.el));
+    const open = discoverFields().filter(f => !planned.has(f.el) && ['text', 'textarea', 'select', 'radioGroup'].includes(f.kind)
+      && (f.signature || '').replace(/\s+/g, ' ').trim().length >= 8 && !(f.el.value && f.kind !== 'select' && f.kind !== 'radioGroup'));
+    if (!open.length) return { job, resumeVersionId, used };
+
+    const look = await send({ type: 'answer_lookup', questions: open.map(f => f.signature.slice(0, 300)) });
+    const leftovers = [];
+    (look.results || []).forEach((r, i) => {
+      const f = open[i];
+      if (!f) return;
+      if (r.match) {
+        let ok = false;
+        if (f.kind === 'text' || f.kind === 'textarea') { setNativeValue(f.el, r.match.answer); ok = true; }
+        else if (f.kind === 'select') { const k = pickOption(f, r.match.answer); if (k >= 0) { setNativeValue(f.el, f.optionEls[k].value); ok = true; } }
+        else if (f.kind === 'radioGroup') { const k = pickOption(f, r.match.answer); if (k >= 0) ok = selectRadio(f.optionEls[k]); }
+        if (ok) {
+          markReview(f.el, 'Filled from your Answer Bank — review before submitting', 'review');
+          used.push({ label: f.signature.slice(0, 200), key: r.intent || 'answer_bank', source: 'answer_bank', bank_id: r.match.id,
+                      value: r.protected ? '' : r.match.answer });
+          return;
+        }
+      }
+      if (r.protected) { markReview(f.el, 'Needs your own answer — never drafted by AI', 'need'); watchForManualAnswer(f); return; }
+      leftovers.push(f);
+    });
+
+    if (job && leftovers.length && (config.schema || null)) {
+      const payload = leftovers.slice(0, 40).map((f, i) => ({ id: `f${i}`, label: f.signature.slice(0, 200), kind: f.kind, options: (f.optionTexts || []).slice(0, 30) }));
+      const mapped = await send({ type: 'map_fields', fields: payload });
+      const extra = {};
+      const mappedFields = [];
+      (mapped.mappings || []).forEach(m => {
+        const f = leftovers[Number(String(m.field_id).slice(1))];
+        if (!f || !m.key) return;
+        (extra[m.key] = extra[m.key] || []).push(f.signature);
+        mappedFields.push(f);
+      });
+      if (mappedFields.length) {
+        const second = buildPlan(mappedFields, { ...config, field_patterns: extra, decline_self_id: false });
+        const r2 = applyPlan(second.filter(p => p.action === 'fill'));
+        r2.filled.forEach(x => {
+          markReview(x.el, 'Matched by meaning, filled from your profile — review before submitting', 'review');
+          used.push({ label: (x.field.signature || '').slice(0, 200), key: x.key, source: 'semantic',
+                      value: (config.protected_keys || []).includes(x.key) ? '' : String(x.value || '') });
+        });
+        second.filter(p => p.action === 'flag').forEach(x => markReview(x.el, 'Needs your review: ' + (x.reason || 'not filled'), 'need'));
+      }
+      leftovers.filter(f => !mappedFields.includes(f)).forEach(watchForManualAnswer);
+    } else {
+      leftovers.forEach(watchForManualAnswer);
+    }
+    return { job, resumeVersionId, used };
+  }
+
   function looksLikeApplication() {
     if (document.querySelector('input[type="file"]')) return true;
     return discoverFields().length >= 3;
@@ -450,6 +612,13 @@
       await new Promise(res => setTimeout(res, 90));
       keepScroll();
     }
+    try {
+      const cp = await copilotPass(config, plan, result);
+      keepScroll();
+      if (cp.job) {
+        send({ type: 'autofill_filled', payload: { job_id: cp.job.id, resume_version_id: cp.resumeVersionId, ats: detectATS(), answers_used: cp.used } });
+      }
+    } catch (e) { /* the deterministic fill already happened; the copilot pass is best effort */ }
     return result;
   }
 

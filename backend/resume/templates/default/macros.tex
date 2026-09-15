@@ -1,0 +1,26 @@
+% Résumé macros for the default template. Base LaTeX only (no titlesec/enumitem),
+% so texlive-latex-base + texlive-latex-recommended + lmodern compile it.
+% Plain single column, real text, no tables or icons: the layout ATS parsers read best.
+
+\newcommand{\resumeheader}[2]{%
+  \begin{center}
+    {\LARGE\bfseries #1}\\[3pt]
+    {\small #2}
+  \end{center}\vspace{-6pt}}
+
+\newcommand{\resumesection}[1]{%
+  \par\vspace{7pt}\noindent{\large\bfseries #1}\par\vspace{-5pt}
+  \noindent\rule{\linewidth}{0.4pt}\par\vspace{1pt}}
+
+% heading, subheading, location, dates
+\newcommand{\resumeentry}[4]{%
+  \par\vspace{3pt}\noindent\textbf{#1}\hfill #3\par
+  \noindent\textit{#2}\hfill\textit{#4}\par}
+
+\newenvironment{resumebullets}{%
+  \begin{list}{\textbullet}{%
+    \setlength{\leftmargin}{1.3em}\setlength{\labelsep}{0.5em}%
+    \setlength{\itemsep}{0pt}\setlength{\parsep}{0pt}\setlength{\topsep}{1pt}}}%
+  {\end{list}}
+
+\newcommand{\resumeskills}[2]{\par\noindent\textbf{#1:} #2\par}

@@ -1347,6 +1347,8 @@ export default function V2JobFeed() {
                         button's own paint; the override is the height, which tracks
                         the collapsing detail header (36/30) like the ✦ button beside it. */}
                     {d.url && <Button variant="secondary" size="sm" href={d.url} target="_blank" style={{ height: headOpen ? 36 : 30 }}>Open ↗</Button>}
+                    {/* the evidence-based workflow: analysis, Role Match, gaps, fact-sourced résumé review */}
+                    <Button variant="secondary" size="sm" href={`/jobs/${d.id}`} title="Analyze, match against your profile, and draft a reviewed résumé" style={{ height: headOpen ? 36 : 30 }}>Workspace</Button>
                     {/* Routed through Button (not hand-drawn) so it reads --btn-shadow/--btn-weight/--btn-primary-bg/-ink
                         and the hover/pressed rules; the style override only restores height/padding/line-height, which track the collapsing header. */}
                     {/* while a tailor runs the button says so and does nothing: `disabled`

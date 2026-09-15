@@ -1,6 +1,6 @@
 import React from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
-import { Settings as SettingsIcon, FileUser, Building2, Search } from 'lucide-react'
+import { Settings as SettingsIcon, FileUser, IdCard, Search } from 'lucide-react'
 import { Button, FooterRow, GlyphBadge, Helper, ModalPanel } from './ui'
 import { useTheme, themeAttrs } from './theme'
 import './theme.css'
@@ -8,10 +8,10 @@ import './theme.css'
 // First-run overlay. Each step is a link to the screen it names, so they
 // stay clickable and hover.
 const STEPS = [
-  [SettingsIcon, 'Set up AI scoring', 'Pick your LLM provider and add its key — Anthropic, OpenAI, Ollama or OpenRouter.', 'settings'],
-  [FileUser, 'Build your résumé + Persona', 'Edit a base résumé and fill Persona (contact, work auth) so jobs score against your profile.', 'resumes'],
-  [Building2, 'Activate a company', 'Enable a seeded company or add your own to start scraping.', 'companies'],
-  [Search, 'Configure a search', 'Enable a keyword search or LinkedIn Personal to discover jobs from boards.', 'searches'],
+  [SettingsIcon, 'Pick a model', 'Ollama runs locally and is the default; choose a model you have pulled. Other providers send your data to them.', 'settings'],
+  [IdCard, 'Build your profile', 'Import a résumé, verify each fact, then add everything it leaves out. Résumés are written only from verified facts.', 'profile'],
+  [FileUser, 'Accept a base résumé', 'Generate a LaTeX résumé from your facts and accept it; tailored versions are reviewed against it.', 'resumes'],
+  [Search, 'Find jobs', 'Run a search or company scrape, or save any posting with the extension, then open its Workspace.', 'searches'],
 ]
 
 export default function WelcomeModal({ onClose }) {

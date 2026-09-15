@@ -8,13 +8,14 @@ import api from '../api'
 import '../theme.css'
 
 // ── shared bits ──────────────────────────────────────────────────────────────
+// Ollama first: the default, and the only provider that keeps your data on this machine.
 const PROVIDERS = [
-  ['claude_api', 'Claude API (Anthropic)'],
-  ['claude_code', 'Claude Code (Subscription)'],
-  ['codex_cli', 'Codex CLI (ChatGPT Subscription)'],
-  ['openai', 'OpenAI'],
-  ['ollama', 'Ollama (Local)'],
-  ['openrouter', 'OpenRouter'],
+  ['ollama', 'Ollama (Local — nothing leaves this machine)'],
+  ['claude_api', 'Claude API (Anthropic) — sends data to Anthropic'],
+  ['claude_code', 'Claude Code (Subscription) — sends data to Anthropic'],
+  ['codex_cli', 'Codex CLI (ChatGPT Subscription) — sends data to OpenAI'],
+  ['openai', 'OpenAI — sends data to OpenAI'],
+  ['openrouter', 'OpenRouter — sends data to OpenRouter'],
 ]
 const PROVIDER_LABEL = Object.fromEntries(PROVIDERS)
 // providers whose catalog /api/llm/models can search live
@@ -196,7 +197,7 @@ export default function Settings() {
       setS(s.data || {}); setDefaults(d.data || {})
       // an override row starts open when it actually has a provider set
       const o = {}
-      for (const k of ['scoring_llm', 'llm_fallback', 'cv_tailor_llm', 'cover_letter_llm', 'autofill_llm', 'email_llm']) {
+      for (const k of ['copilot_llm', 'scoring_llm', 'llm_fallback', 'cv_tailor_llm', 'cover_letter_llm', 'autofill_llm', 'email_llm']) {
         o[k] = !!(s.data || {})[`${k}_provider`]
       }
       setOvr(o)
@@ -292,7 +293,7 @@ export default function Settings() {
     return Array.isArray(m) ? m : []
   }, [S])
   const modelsFor = (provider) => {
-    const p = provider || 'claude_api'
+    const p = provider || 'ollama'
     const opts = modelsList.filter((m) => m.provider === p).map((m) => [m.model, m.label || m.model])
     return opts
   }
@@ -349,7 +350,10 @@ export default function Settings() {
         { kind: 'pair', label: 'Primary provider · model', help: 'Every AI feature uses this pair unless overridden below.',
           pKey: 'llm_provider', mKey: 'llm_model',
           info: "Providers: Claude API, Claude Code, Codex CLI (your ChatGPT subscription), OpenAI, Ollama (local), OpenRouter. The model list shows that provider's models, including any you added under Model catalog. OpenRouter covers every vendor with one key but has no prompt-cache discount. The two subscription CLIs are meant for attended use and have plan limits; a limit hit fails over to the fallback without retrying." },
-        B('API key', 'API key for the primary provider.', 'llm_api_key', { secret: true, mono: true, w: '340px', hide: () => KEYLESS.includes(val('llm_provider', 'claude_api')) }),
+        B('API key', 'API key for the primary provider.', 'llm_api_key', { secret: true, mono: true, w: '340px', hide: () => KEYLESS.includes(val('llm_provider', 'ollama')) }),
+        B('Ollama endpoint', 'Where the local Ollama server listens. Empty uses OLLAMA_BASE_URL, else http://localhost:11434.', 'ollama_base_url',
+          { mono: true, w: '340px', placeholder: 'http://localhost:11434' }),
+        LLM('Copilot', 'Job analysis, evidence matching, résumé writing and the claim audit (temperature 0, schema-constrained).', 'copilot_llm'),
         LLM('Scoring', 'Model that scores new jobs against your résumés.', 'scoring_llm'),
         LLM('Scoring fallback', 'Retries scoring once on error or rate limit — scoring only.', 'llm_fallback',
           { info: 'Used only when the scoring call fails or is rate-limited. One retry, then the job stays unscored until the next run. Choose a cheap model from a different provider than the primary.' }),
@@ -359,6 +363,40 @@ export default function Settings() {
         LLM('Email classification', 'Model that sorts Gmail replies into application events.', 'email_llm'),
         { kind: 'models', label: 'Model catalog', help: 'Add new or unlisted models and remove your additions.',
           info: 'Add models that are not in the built-in list. Search uses the provider’s catalog for OpenRouter, OpenAI and Claude. For Ollama, type the local model name. Removed models stay removed.' },
+      ]],
+      ['copilot', '', 'Copilot', '', [
+        BT('Where your data goes', 'Which provider receives job text, profile facts and application answers, per feature.', 'Show', async () => {
+          const { data } = await api.get('/copilot/privacy')
+          await ask({
+            title: data.any_external ? 'Some features send data to an external provider' : 'Everything runs on this machine',
+            body: data.features.map((f) => `${f.label}: ${f.external ? `SENT TO ${f.provider}` : `local (${f.destination})`} — ${f.sends}`).join('\n'),
+            label: 'OK',
+          })
+        }),
+        E('Role Match weights', 'Share of the score per component; a component with nothing to measure is left out and the rest re-weighted.', 'role_match_weights',
+          { json: true, sub: 'JSON: eligibility, required, preferred, experience, technology, parser_health' }),
+        B('Recommended minimum', 'Role Match at or above which a job reads as recommended.', 'role_match_min_recommended', { int: true, w: '90px' }),
+        SEL('Résumé template', 'LaTeX template folder under backend/resume/templates.', 'resume_template', [['default', 'default']], { dflt: 'default', w: '240px' }),
+        B('Page target', 'A compiled résumé longer than this is flagged in Parser Health.', 'resume_page_target', { int: true, w: '90px' }),
+        SEL('Projects on tailored résumés', 'Whether tailoring may swap in different projects or only reorder the base ones.', 'resume_project_policy',
+          [['keep', 'Keep the base projects'], ['reorder', 'Reorder the base projects'], ['replace', 'May replace projects']], { dflt: 'reorder', w: '260px' }),
+        SEL('Skill order', 'How the skills section is ordered.', 'resume_skill_ordering',
+          [['relevance', 'Most relevant to the job first'], ['profile', 'Your profile order']], { dflt: 'relevance', w: '260px' }),
+        E('Section order', 'Order of résumé sections.', 'resume_section_order', { json: true, sub: 'JSON list of: education, experience, research, projects, skills, certifications' }),
+        SEL('Résumé for jobs with none accepted', 'What autofill uploads when the job has no accepted résumé.', 'autofill_resume_fallback',
+          [['none', 'Upload nothing'], ['latest', 'Latest accepted résumé']], { dflt: 'none', w: '260px' }),
+        SEL('Overleaf', 'Optional editor destination; the local LaTeX version stays authoritative.', 'overleaf_mode',
+          [['disabled', 'Disabled'], ['export', 'Export (.tex, PDF, ZIP downloads)'], ['git', 'Git remote']], { dflt: 'disabled', w: '280px' }),
+        B('Overleaf Git URL', 'https://git.overleaf.com/<project id>. The token goes in OVERLEAF_GIT_TOKEN (.env), never here.', 'overleaf_git_remote',
+          { mono: true, w: '340px', placeholder: 'https://git.overleaf.com/…', hide: () => val('overleaf_mode', 'disabled') !== 'git' }),
+        BT('Overleaf remote status', 'Checks the token and the last commit of the local clone.', 'Check', async () => {
+          const { data } = await api.get('/copilot/overleaf')
+          flash(data.error || `${data.token_configured ? 'token set' : 'no OVERLEAF_GIT_TOKEN'} · ${data.last_commit || 'not pulled yet'}`, !!data.error)
+        }, { hide: () => val('overleaf_mode', 'disabled') !== 'git' }),
+        BT('Pull from Overleaf', 'Fetch the Overleaf project into the local clone. Local versions are not changed.', 'Pull', async () => {
+          const { data } = await api.post('/copilot/overleaf/pull')
+          flash(`Pulled · ${data.last_commit || 'empty project'}`)
+        }, { hide: () => val('overleaf_mode', 'disabled') !== 'git' }),
       ]],
       ['scoring', '', 'Scoring behavior', '', [
         SEL('Default résumé', 'Used when a company has no résumés of its own selected.', 'default_resume_id', resumeOpts, { w: '260px' }),
@@ -633,7 +671,7 @@ function Row({ r, ctx }) {
         return <Toggle on={on} label={on ? 'On' : 'Off'} onPick={() => save(r.key, on ? 'false' : 'true')} ariaLabel={r.label} />
       }
       case 'pair': {
-        const p = val(r.pKey, 'claude_api')
+        const p = val(r.pKey, 'ollama')
         return (
           <>
             <Select value={p} options={PROVIDERS} onPick={(v) => save(r.pKey, v)} width="220px" ariaLabel={`${r.label} — provider`} />
@@ -647,7 +685,7 @@ function Row({ r, ctx }) {
         return (
           <>
             {on && <Select value={p} options={PROVIDERS} onPick={(v) => save(`${r.base}_provider`, v)} width="200px" placeholder="pick provider…" ariaLabel={`${r.label} — provider`} />}
-            {on && <Select value={val(`${r.base}_model`)} options={modelsFor(p || val('llm_provider', 'claude_api'))} onPick={(v) => save(`${r.base}_model`, v)} width="260px" mono placeholder="pick model…" ariaLabel={`${r.label} — model`} emptyText={NO_MODELS} />}
+            {on && <Select value={val(`${r.base}_model`)} options={modelsFor(p || val('llm_provider', 'ollama'))} onPick={(v) => save(`${r.base}_model`, v)} width="260px" mono placeholder="pick model…" ariaLabel={`${r.label} — model`} emptyText={NO_MODELS} />}
             {on && p && !KEYLESS.includes(p) && (
               <span title="API key for this override's provider" style={{ display: 'flex', flex: '0 1 150px', minWidth: 0 }}>
                 <TextBox value={val(`${r.base}_api_key`)} onSave={(v) => save(`${r.base}_api_key`, v)} width="150px" mono secret ariaLabel={`${r.label} — API key`} />

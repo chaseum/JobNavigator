@@ -662,6 +662,13 @@
       setTimeout(() => { try { note.remove(); } catch {} }, 3000);
       return;
     }
+    if (String(err || '').startsWith('protected')) {
+      s.root.getElementById('mainRow').innerHTML =
+        `<span class="err">Answer this one yourself — AI never drafts work authorization, sponsorship, EEO, salary or legal answers.</span>
+         <span class="spacer"></span><button id="cancel">Dismiss</button>`;
+      s.root.getElementById('cancel').onclick = () => teardownSession(s.key, { reveal: true });
+      return;
+    }
     s.root.getElementById('mainRow').innerHTML =
       `<span class="err">Couldn't reach the model — ${err || 'try again'}</span>
        <span class="spacer"></span><button id="retry">Try again</button>

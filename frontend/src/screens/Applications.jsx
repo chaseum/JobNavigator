@@ -40,10 +40,18 @@ const srcLabel = (v) => ({
 // Dots read the shared --stage-* tokens (theme.css), not generic --warn/--good/--bad,
 // so a stage is the same colour here, in the Stats funnel, and on the Sankey nodes.
 const STAGES = [
+  { id: 'saved', label: 'Saved', dot: 'var(--muted)', hint: 'Shortlisted, not started' },
+  { id: 'analyzed', label: 'Analyzed', dot: 'var(--muted)', hint: 'Role Match computed' },
+  { id: 'resume_drafted', label: 'Résumé drafted', dot: 'var(--muted)', hint: 'A tailored résumé is in review' },
+  { id: 'ready_to_apply', label: 'Ready to apply', dot: 'var(--stage-applied)', hint: 'Form filled by the extension — you submit' },
   { id: 'applied', label: 'Applied', dot: 'var(--stage-applied)', hint: 'Waiting on a first response' },
+  { id: 'oa', label: 'OA', dot: 'var(--stage-interview)', hint: 'Online assessment' },
+  { id: 'recruiter_screen', label: 'Recruiter screen', dot: 'var(--stage-interview)', hint: 'First call' },
   { id: 'interview', label: 'Interview', dot: 'var(--stage-interview)', hint: 'Interviewing' },
+  { id: 'final', label: 'Final', dot: 'var(--stage-interview)', hint: 'Final round' },
   { id: 'offer', label: 'Offer', dot: 'var(--stage-offer)', hint: 'Offer received' },
   { id: 'rejected', label: 'Rejected', dot: 'var(--stage-rejected)', hint: 'Closed — kept in Stats' },
+  { id: 'withdrawn', label: 'Withdrawn', dot: 'var(--stage-rejected)', hint: 'You withdrew' },
 ]
 const STAGE = Object.fromEntries(STAGES.map((s) => [s.id, s]))
 // legacy rows (ghosted / withdrawn) have no stage of their own — closed, so they list under Rejected
@@ -58,7 +66,7 @@ const LOG_STATUSES = [
   ...STAGES.filter((s) => s.id !== 'rejected'),
 ]
 const SORTS = [['recent', 'Recent activity'], ['oldest', 'Waiting longest'], ['company', 'Company name']]
-const isStale = (a) => daysSince(a.updated_at) > 7 && ['applied', 'interview'].includes(a.status)
+const isStale = (a) => daysSince(a.updated_at) > 7 && ['applied', 'oa', 'recruiter_screen', 'interview', 'final'].includes(a.status)
 
 // where a popover sits; how it looks is `Menu`'s.
 const POPOVER = { position: 'absolute', top: '100%', zIndex: 40 }

@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import {
   Newspaper, Search, Building2, Send, FileUser, Mail,
-  Fingerprint, ChartLine, Settings as SettingsIcon,
+  Fingerprint, ChartLine, Settings as SettingsIcon, IdCard, MessageSquareText, LayoutDashboard,
 } from 'lucide-react'
 import api from './api'
 import { useTheme, themeAttrs, appearanceTitle, MODE_ICON } from './theme'
@@ -15,6 +15,7 @@ import './theme.css'
 // amber dot beside the icon since the label/count are gone.
 const GROUPS = [
   { label: 'Find', items: [
+    { to: '/dashboard', label: 'Dashboard', ready: true, Icon: LayoutDashboard },
     { to: '/feed', label: 'Jobs', ready: true, countKey: 'jobs', Icon: Newspaper },
     { to: '/searches', label: 'Searches', ready: true, countKey: 'searches', Icon: Search, warnKey: 'searches' },
     { to: '/companies', label: 'Companies', ready: true, countKey: 'companies', Icon: Building2, warnKey: 'companies' },
@@ -25,6 +26,8 @@ const GROUPS = [
     { to: '/cover-letters', label: 'Cover Letters', ready: true, countKey: 'letters', Icon: Mail },
   ]},
   { label: 'You', items: [
+    { to: '/profile', label: 'Profile', ready: true, Icon: IdCard },
+    { to: '/answer-bank', label: 'Answer Bank', ready: true, Icon: MessageSquareText },
     { to: '/persona', label: 'Persona', ready: true, Icon: Fingerprint },
     { to: '/stats', label: 'Stats', ready: true, Icon: ChartLine },
     { to: '/settings', label: 'Settings', ready: true, Icon: SettingsIcon },

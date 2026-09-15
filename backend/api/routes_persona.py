@@ -293,11 +293,79 @@ def append_qa_bank(body: dict, db: Session = Depends(get_db)):
         p = Persona(id=1, qa_bank=[])
         db.add(p)
 
-    bank = list(p.qa_bank or [])
-    bank.append({"question": question, "answer": answer})
+    from backend.copilot.answer_bank import save
+    # an answer the user approved in the extension is their own; equivalent wordings merge as aliases
+    bank, entry = save(p.qa_bank or [], question, answer, verified=True)
     p.qa_bank = bank
     # JSON columns need explicit change flagging so SQLAlchemy detects the mutation.
     flag_modified(p, "qa_bank")
     p.updated_at = utcnow()
     db.commit()
-    return {"count": len(bank)}
+    return {"count": len(bank), "entry_id": entry["id"], "merged": len(entry["aliases"]) > 0}
+
+
+# ── Answer Bank ───────────────────────────────────────────────────────────────
+
+def _bank_row(db):
+    p = db.query(Persona).filter(Persona.id == 1).first()
+    if not p:
+        p = Persona(id=1, qa_bank=[])
+        db.add(p)
+    return p
+
+
+def _bank_out(p):
+    from backend.copilot import answer_bank as AB
+    return {"entries": [{**e, "protected": AB.is_protected(e["intent"])} for e in AB.entries(p.qa_bank)]}
+
+
+@router.get("/answer-bank")
+def get_answer_bank(db: Session = Depends(get_db)):
+    return _bank_out(_bank_row(db))
+
+
+@router.post("/answer-bank", status_code=201)
+def add_answer(body: dict, db: Session = Depends(get_db)):
+    from backend.copilot.answer_bank import save
+    question, answer = str_field(body, "question"), str_field(body, "answer")
+    if not question or not answer:
+        raise HTTPException(400, "question and answer are required")
+    p = _bank_row(db)
+    p.qa_bank, entry = save(p.qa_bank or [], question, answer, verified=True, answer_type=body.get("answer_type") or None)
+    flag_modified(p, "qa_bank")
+    db.commit()
+    return {**_bank_out(p), "entry_id": entry["id"]}
+
+
+@router.put("/answer-bank/{entry_id}")
+def update_answer(entry_id: str, body: dict, db: Session = Depends(get_db)):
+    from backend.copilot import answer_bank as AB
+    p = _bank_row(db)
+    rows = AB.entries(p.qa_bank)
+    row = next((e for e in rows if e["id"] == entry_id), None)
+    if row is None:
+        raise HTTPException(404, "answer not found")
+    for key in ("question", "answer", "answer_type"):
+        if isinstance(body.get(key), str):
+            row[key] = body[key]
+    if isinstance(body.get("aliases"), list):
+        row["aliases"] = [str(a) for a in body["aliases"] if str(a).strip()]
+    if "user_verified" in body:
+        row["user_verified"] = bool(body["user_verified"])
+    p.qa_bank = [AB.stored(e) for e in rows]
+    flag_modified(p, "qa_bank")
+    db.commit()
+    return _bank_out(p)
+
+
+@router.delete("/answer-bank/{entry_id}")
+def delete_answer(entry_id: str, db: Session = Depends(get_db)):
+    from backend.copilot import answer_bank as AB
+    p = _bank_row(db)
+    rows = AB.entries(p.qa_bank)
+    if not any(e["id"] == entry_id for e in rows):
+        raise HTTPException(404, "answer not found")
+    p.qa_bank = [AB.stored(e) for e in rows if e["id"] != entry_id]
+    flag_modified(p, "qa_bank")
+    db.commit()
+    return _bank_out(p)

@@ -243,6 +243,35 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true; // Async response
   }
 
+  // --- Application copilot relays (local backend only) ---
+  // job_context: which saved job this page belongs to and its accepted résumé.
+  // resume_pdf: that accepted résumé (the server refuses anything not accepted).
+  // answer_lookup / map_fields: Answer Bank matches and the label-only semantic fallback.
+  // autofill_filled: records the application at ready_to_apply. Nothing here submits a form.
+  const COPILOT = {
+    job_context: (m, tabUrl) => ['POST', '/api/autofill/job-context', { url: m.url, tab_url: tabUrl }],
+    resume_pdf: (m) => ['GET', `/api/autofill/resume/${encodeURIComponent(m.version_id)}`],
+    answer_lookup: (m) => ['POST', '/api/autofill/lookup', { questions: m.questions }],
+    map_fields: (m) => ['POST', '/api/autofill/map-fields', { fields: m.fields }],
+    autofill_filled: (m, tabUrl) => ['POST', '/api/autofill/filled', { ...m.payload, tab_url: tabUrl }],
+  };
+  if (COPILOT[msg.type]) {
+    const [method, path, body] = COPILOT[msg.type](msg, sender.tab && sender.tab.url);
+    chrome.storage.sync.get(['serverUrl', 'apiKey'], async (settings) => {
+      const serverUrl = settings.serverUrl || 'http://localhost';
+      const headers = { 'Content-Type': 'application/json' };
+      if (settings.apiKey) headers['X-API-Key'] = settings.apiKey;
+      try {
+        const resp = await fetch(`${serverUrl}${path}`, { method, headers, body: body ? JSON.stringify(body) : undefined });
+        const data = await resp.json().catch(() => ({}));
+        sendResponse(resp.ok ? data : { error: (data && data.detail) || `Server error: ${resp.status}` });
+      } catch (e) {
+        sendResponse({ error: e.message });
+      }
+    });
+    return true; // Async response
+  }
+
   // Content script requests the structured-autofill config (answers + dictionaries)
   if (msg.type === 'autofill_config') {
     chrome.storage.sync.get(['serverUrl', 'apiKey'], async (settings) => {

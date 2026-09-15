@@ -113,6 +113,27 @@ Scrape career pages and aggregators, score jobs against your résumés with an L
 
 > The posting preview is an `iframe`; sites that refuse framing show blank unless the extension (which strips the frame-blocking headers) is installed. "Open" always works, and applied jobs keep a cached snapshot.
 
+## Evidence-based application copilot (local-first)
+
+JobNavigator keeps a fact database of your career, and a model is never the source of truth:
+
+```
+profile facts → job requirements → evidence mapping → résumé plan → safe rewrites → claim audit → LaTeX/PDF → autofill
+```
+
+| Step | Where | What it guarantees |
+|------|-------|--------------------|
+| **Profile** | `/profile` | Employment, internships, projects, research, skills linked to where you used them, education, certifications, achievements, links, work authorization, preferences. Imported facts arrive **unverified** and are ignored until you verify them. Put everything true here, far more than fits on one page. |
+| **Role Match** | a job's **Workspace** (`/jobs/:id`) | Requirements are extracted with schema-constrained output at temperature 0 and marked MATCHED / PARTIAL / MISSING / UNKNOWN with the facts that support each one. The 0–100 score is computed deterministically, every component is shown, and the weights live in Settings › Copilot. A claim without a verified citation earns nothing, and work authorization comes only from your own answers. It measures evidence coverage; it is not any employer's ATS score. |
+| **Gaps** | Workspace | Safe to add · safe to rephrase · cannot claim · needs clarification. New context is saved as a verified profile fact first, then the match reruns. A missing requirement is never written onto a résumé. |
+| **Résumé** | Workspace | Drafted only from verified facts, through a fixed LaTeX template (`backend/resume/templates/default`). Employers, titles, schools, degrees, project names and dates are copied from facts, never written by the model. Every bullet carries `source_fact_ids`. Machine checks (uncited claims; numbers or tools absent from the sources) plus a second model audit mark each claim SUPPORTED / AMBIGUOUS / UNSUPPORTED. An unsupported claim blocks the PDF, and nothing is fixed silently. **Parser Health** reads the compiled PDF back and checks the name, headings, companies, titles, schools, skills, bullet order and encoding. |
+| **Review** | Workspace | Base vs. tailored diff. For each change: inspect its sources, the requirements it addresses and the reason; accept, reject, regenerate or edit. Accepted versions are immutable and written to `generated/<company>/<role>/<date>-<id>/` (`resume.tex`, `resume.pdf`, `resume.json`, `audit.json`, `job-analysis.json`). |
+| **Apply** | Chrome extension | On an application page for a saved job it fills profile fields, uploads that job's **accepted** résumé, reuses **Answer Bank** answers (`/answer-bank`), outlines every field that needs you, and records the application as *Ready to apply*. It never clicks Submit. Work authorization, sponsorship, EEO, disability, veteran status, salary and legal attestations are never drafted by AI. |
+
+**Local by default.** Ollama is the default provider, and no model is assumed: pick one you have pulled in Settings › AI. The Docker backend reaches Ollama on the host at `host.docker.internal:11434` (`OLLAMA_BASE_URL`). Settings › Copilot › *Where your data goes* lists every feature, the provider it uses, and whether anything leaves the machine.
+
+**Overleaf** is optional and never authoritative. Export `.tex`, the PDF, or an Overleaf-ready ZIP from any version, or switch to Git mode to push accepted versions to the project's Git remote and pull its state. The token lives in `OVERLEAF_GIT_TOKEN` and is never stored.
+
 ## Quick Start
 
 ```bash
@@ -134,11 +155,14 @@ docker compose exec backend codex login status
 
 Then pick **Codex CLI (ChatGPT Subscription)** in Settings › AI. The login lives in the `codex_auth` volume (about 100 MB with Codex's own state); no API key needed. A plan limit fails over to the fallback provider without retrying.
 
+For the local default, install [Ollama](https://ollama.com) on the host and `ollama pull` a model. LaTeX ships in the backend image; running the backend outside Docker needs `pdflatex` (TeX Live or MiKTeX).
+
 **First steps:**
-1. Settings › AI — provider and key
-2. Résumés — create a base résumé or import a PDF
-3. Persona — import from that résumé, fill the Q&A bank
-4. Companies and Searches — add a few, run them
+1. Settings › AI — Ollama (default) with a model you have pulled, or another provider and key
+2. Profile — import a résumé, verify the facts, then add everything the résumé leaves out
+3. Résumés — generate a base résumé from your facts and accept it
+4. Companies and Searches — add a few and run them, or save any posting with the extension
+5. A job's Workspace — analyze, review the match and gaps, generate and accept a résumé, then apply with the extension
 
 ## Chrome Extension ("The Navigator")
 
@@ -179,7 +203,7 @@ Found a vulnerability? See [SECURITY.md](SECURITY.md). Please don't open public 
 
 ## Privacy
 
-Self-hosted. Your résumés, jobs and credentials stay on your machine; the only outside party is the AI provider you configure.
+Self-hosted. Your résumés, jobs and credentials stay on your machine; the only outside party is the AI provider you configure, and with the default Ollama provider there is none. Settings › Copilot shows exactly which features send what, and where.
 
 ## Disclaimer
 

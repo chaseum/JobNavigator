@@ -17,7 +17,8 @@ def test_append_qa(api_client, test_db):
     from backend.models.db import Persona as P
     p = test_db.query(P).filter(P.id == 1).first()
     test_db.refresh(p)
-    assert p.qa_bank[-1] == {"question": "Why Rogo?", "answer": "Finance + AI."}
+    last = p.qa_bank[-1]
+    assert (last["question"], last["answer"], last["user_verified"]) == ("Why Rogo?", "Finance + AI.", True)
 
 
 def test_append_requires_both(api_client, test_db):
