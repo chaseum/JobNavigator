@@ -7,10 +7,14 @@ const APP = 'JobNavigator'
 // editor loads and names the actual document.
 const ROUTES = [
   ['/feed', 'Jobs'],
+  ['/jobs', 'Job'],
+  ['/profile', 'Profile'],
+  ['/dashboard', 'Dashboard'],
+  ['/answer-bank', 'Answer bank'],
   ['/searches', 'Searches'],
   ['/companies', 'Companies'],
   ['/applications', 'Applications'],
-  ['/resumes', 'Résumés'],
+  ['/resumes', 'Resume'],
   ['/cover-letters', 'Cover Letters'],
   ['/persona', 'Persona'],
   ['/stats', 'Stats'],

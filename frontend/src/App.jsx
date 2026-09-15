@@ -16,8 +16,8 @@ import LoginModal from './LoginModal'
 import WelcomeModal from './WelcomeModal'
 import NewUiModal from './NewUiModal'
 import Shell from './Shell'
-import JobFeed from './screens/JobFeed'
-import Resumes from './screens/Resumes'
+import Jobs from './screens/Jobs'
+import Resumes, { ResumeVersionPage } from './screens/Resumes'
 import ResumeEditor from './screens/ResumeEditor'
 import Companies from './screens/Companies'
 import Searches from './screens/Searches'
@@ -236,8 +236,9 @@ function App() {
         {/* the app */}
         <Route path="/" element={<Shell />}>
           <Route index element={<Navigate to="feed" replace />} />
-          <Route path="feed" element={<JobFeed />} />
+          <Route path="feed" element={<Jobs />} />
           <Route path="resumes" element={<Resumes />} />
+          <Route path="resumes/versions/:id" element={<ResumeVersionPage />} />
           <Route path="resumes/:id" element={<ResumeEditor />} />
           <Route path="companies" element={<Companies />} />
           <Route path="searches" element={<Searches />} />

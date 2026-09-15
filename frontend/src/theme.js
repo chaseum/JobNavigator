@@ -24,8 +24,10 @@ export const MODES = ['light', 'dark', 'system']
 // stored value keeps painting. THEME_PICKER is the shipped subset the Settings
 // row offers; the rest (tone1-3, editorial, alt) are development stops that stay
 // reachable from the /ui gallery and by a stored key, but are not on offer.
-export const THEMES = ['default', 'board', 'tone1', 'tone2', 'tone3', 'editorial', 'alt', 'cobalt', 'saas', 'win98']
-export const THEME_PICKER = ['default', 'board', 'cobalt', 'saas', 'win98']
+export const THEMES = ['clean', 'default', 'board', 'tone1', 'tone2', 'tone3', 'editorial', 'alt', 'cobalt', 'saas', 'win98']
+export const THEME_PICKER = ['clean', 'default', 'board', 'cobalt', 'saas', 'win98']
+// what a browser that never picked a theme paints (and what junk validates down to)
+export const DEFAULT_THEME = 'clean'
 
 // Three-state control (Light → Dark → System), so it needs three glyphs.
 export const MODE_ICON = { light: '◐', dark: '◑', system: '◒' }
@@ -34,6 +36,7 @@ export const MODE_OPTIONS = MODES.map((m) => [m, MODE_LABEL[m]])
 // Picker labels name what you see, not the id behind it — the ids never move,
 // so a stored `cobalt` keeps painting while the row reads "Stone".
 export const THEME_LABEL = {
+  clean: 'Clean',
   default: 'Paper',
   board: 'Green Paper',
   tone1: 'Tone 1 — ¼ toward Editorial',
@@ -76,7 +79,7 @@ function readMode() {
 }
 function readTheme() {
   const raw = ls((s) => s.getItem(THEME_KEY), null)
-  return THEMES.includes(raw) ? raw : 'default'
+  return THEMES.includes(raw) ? raw : DEFAULT_THEME
 }
 
 const mq = () => {
@@ -119,7 +122,7 @@ export function setMode(mode) {
   setState({ mode })
 }
 export function setTheme(theme) {
-  const s = THEMES.includes(theme) ? theme : 'default'
+  const s = THEMES.includes(theme) ? theme : DEFAULT_THEME
   ls((st) => st.setItem(THEME_KEY, s), null)
   setState({ theme: s })
 }

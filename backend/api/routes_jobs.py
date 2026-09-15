@@ -1,11 +1,13 @@
 """Job listing and management endpoints."""
 import logging
+import re
+from datetime import timedelta
 from typing import Annotated, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, asc, text, func
-from backend.models.db import get_db, Job, find_company_by_name
+from backend.models.db import get_db, Job, find_company_by_name, utcnow
 from backend.api._input import str_field, uuid_filter
 from backend.scraper._shared.dedup import make_external_id, make_content_hash
 from backend.analyzer.salary_extractor import apply_salary_to_job
@@ -110,7 +112,14 @@ def list_jobs(
     title_search: Optional[str] = None,
     min_salary: Optional[int] = None,
     max_salary: Optional[int] = None,
-    sort_by: Optional[str] = Query("date", pattern="^(date|score|salary|company)$"),
+    # Role Match filters read each job's latest Copilot analysis; setting any of
+    # them keeps analyzed jobs only.
+    min_match: Optional[int] = None,
+    level: Optional[str] = None,
+    employment_type: Optional[str] = None,
+    max_years: Optional[int] = None,
+    since_days: Annotated[Optional[int], Query(ge=0)] = None,
+    sort_by: Optional[str] = Query("date", pattern="^(date|score|salary|company|match)$"),
     # ge=0: without a lower bound a negative limit reaches Postgres as LIMIT -5,
     # which is a DataError the id handler then reports as a 500 (R4-T1-07).
     limit: Annotated[int, Query(ge=0, le=200)] = 50,
@@ -158,6 +167,11 @@ def list_jobs(
     clause = _arrangement_clause(arrangement)
     if clause is not None:
         q = q.filter(clause)
+    if since_days is not None:
+        q = q.filter(Job.discovered_at >= utcnow() - timedelta(days=since_days))
+    if min_match is not None or level or employment_type or max_years is not None:
+        q = q.filter(Job.id.in_(_analysis_filter_ids(_latest_analyses(db), min_match=min_match, level=level,
+                                                     employment_type=employment_type, max_years=max_years)))
 
     total = q.count()
 
@@ -167,6 +181,8 @@ def list_jobs(
         q = q.order_by(desc(Job.salary_max).nullslast())
     elif sort_by == "company":
         q = q.order_by(asc(Job.company))
+    elif sort_by == "match":
+        q = q.order_by(_match_score_col().desc().nullslast(), desc(Job.discovered_at))
     else:  # "date" (default)
         q = q.order_by(desc(Job.discovered_at))
 
@@ -196,12 +212,16 @@ def list_jobs(
         in_flight_detail_map.setdefault(key, []).append(
             {"job_type": r.job_type, "meta": r.meta})
 
+    from backend.copilot.facts import profile_version
+    analyses = _latest_analyses(db, job_ids)
+    version = profile_version(db) if analyses else None
     rows = [
         _job_to_dict(
             j,
             tailored_resume_id=tailored_map.get(j.id),
             in_flight=in_flight_map.get(str(j.id), []),
             in_flight_detail=in_flight_detail_map.get(str(j.id), []),
+            role_match=_role_match_summary(analyses[j.id], version) if j.id in analyses else None,
         )
         for j in jobs
     ]
@@ -210,6 +230,94 @@ def list_jobs(
             for k in _BRIEF_DROPPED:
                 r.pop(k, None)
     return {"total": total, "jobs": rows}
+
+
+# ── Role Match in the feed ───────────────────────────────────────────────────
+
+def _latest_analyses(db, job_ids=None) -> dict:
+    """{job_id: newest JobAnalysisRecord}; every analyzed job when `job_ids` is None."""
+    from backend.models.db import JobAnalysisRecord
+    q = db.query(func.max(JobAnalysisRecord.id)).group_by(JobAnalysisRecord.job_id)
+    if job_ids is not None:
+        if not job_ids:
+            return {}
+        q = q.filter(JobAnalysisRecord.job_id.in_(job_ids))
+    ids = [r[0] for r in q.all()]
+    rows = db.query(JobAnalysisRecord).filter(JobAnalysisRecord.id.in_(ids)).all() if ids else []
+    return {r.job_id: r for r in rows}
+
+
+def _norm_label(v) -> str:
+    return str(v or "").strip().lower()
+
+
+_YEARS = re.compile(r"(\d{1,2})\s*\+?\s*(?:-|–|to)?\s*\d{0,2}\s*\+?\s*(?:years?|yrs?)\b", re.I)
+
+
+def _years_required(analysis: dict):
+    """Largest "N years" lower bound the posting's experience requirements state; None when none does."""
+    texts = list(analysis.get("experience_requirements") or []) + [
+        r.get("text") or "" for r in analysis.get("requirements") or [] if r.get("category") == "experience"]
+    found = [int(m.group(1)) for t in texts for m in _YEARS.finditer(t or "")]
+    return max(found) if found else None
+
+
+def _analysis_filter_ids(analyses: dict, min_match=None, level=None, employment_type=None, max_years=None):
+    """Job ids whose latest analysis passes the Role Match filters; None when no such filter is set.
+
+    ponytail: filters in Python over every job's latest analysis. Analyses are
+    per-job LLM runs, so the set stays small; promote score/level to columns if it doesn't.
+    """
+    if min_match is None and not level and not employment_type and max_years is None:
+        return None
+    levels = {_norm_label(v) for v in (level or "").split(",") if v.strip()}
+    types = {_norm_label(v) for v in (employment_type or "").split(",") if v.strip()}
+    keep = []
+    for jid, rec in analyses.items():
+        a = rec.analysis or {}
+        score = (rec.match or {}).get("score")
+        if min_match is not None and (score is None or score < min_match):
+            continue
+        if levels and _norm_label(a.get("experience_level")) not in levels:
+            continue
+        if types and _norm_label(a.get("employment_type")) not in types:
+            continue
+        if max_years is not None and (_years_required(a) or 0) > max_years:
+            continue
+        keep.append(jid)
+    return keep
+
+
+def _match_score_col():
+    """The outer Job row's newest Role Match score as a correlated scalar; NULL when unanalyzed."""
+    from sqlalchemy import select
+    from backend.models.db import JobAnalysisRecord
+    return (select(JobAnalysisRecord.match["score"].as_float())
+            .where(JobAnalysisRecord.job_id == Job.id)
+            .order_by(JobAnalysisRecord.id.desc()).limit(1)
+            .correlate(Job).scalar_subquery())
+
+
+def _role_match_summary(rec, version) -> dict:
+    """The feed card's slice of a job's latest Role Match: score, rationale and the analysis fields it shows."""
+    a, m = rec.analysis or {}, rec.match or {}
+    status = {e.get("requirement_id"): e.get("status") for e in rec.evidence or []}
+    reqs = sorted(a.get("requirements") or [], key=lambda r: (not r.get("required"), -int(r.get("importance") or 2)))
+
+    def texts(*wanted):
+        return [r.get("text") for r in reqs if status.get(r.get("id")) in wanted][:3]
+
+    return {
+        "score": m.get("score"),
+        "counts": m.get("counts"),
+        "hard_blockers": len(m.get("hard_blockers") or []),
+        "stale": rec.evidence is None or rec.profile_version != version,
+        "matched": texts("MATCHED"),
+        "missing": texts("MISSING", "UNKNOWN"),
+        "employment_type": a.get("employment_type") or None,
+        "experience_level": a.get("experience_level") or None,
+        "years_required": _years_required(a),
+    }
 
 
 # The long text fields a `brief=1` listing leaves out.
@@ -299,7 +407,7 @@ def _arrangement_clause(raw):
 def _apply_common_filters(q, status=None, company=None, source=None, h1b_verdict=None,
                           min_score=None, saved=None, title_search=None, remote=None,
                           min_salary=None, max_salary=None, search_id=None,
-                          location=None, arrangement=None):
+                          location=None, arrangement=None, since_days=None, job_ids=None):
     """Apply shared filter logic for job list and filter-list endpoints."""
     if status:
         vals = [s.strip() for s in status.split(",") if s.strip()]
@@ -334,6 +442,10 @@ def _apply_common_filters(q, status=None, company=None, source=None, h1b_verdict
     clause = _arrangement_clause(arrangement)
     if clause is not None:
         q = q.filter(clause)
+    if since_days is not None:
+        q = q.filter(Job.discovered_at >= utcnow() - timedelta(days=since_days))
+    if job_ids is not None:
+        q = q.filter(Job.id.in_(job_ids))
     return q
 
 
@@ -494,6 +606,11 @@ def job_facets(
     min_salary: Optional[int] = None,
     max_salary: Optional[int] = None,
     search_id: Optional[str] = None,
+    min_match: Optional[int] = None,
+    level: Optional[str] = None,
+    employment_type: Optional[str] = None,
+    max_years: Optional[int] = None,
+    since_days: Annotated[Optional[int], Query(ge=0)] = None,
     db: Session = Depends(get_db),
 ):
     """Every filter menu's options and counts in one answer, so the feed's menus
@@ -519,7 +636,10 @@ def job_facets(
     expanded = _expand_company_filter(db, company)
     base = dict(status=status, company=expanded, source=source, h1b_verdict=h1b_verdict,
                 min_score=min_score, saved=saved, title_search=title_search, remote=remote, location=location, arrangement=arrangement,
-                min_salary=min_salary, max_salary=max_salary, search_id=search_id)
+                min_salary=min_salary, max_salary=max_salary, search_id=search_id, since_days=since_days)
+    analyses = _latest_analyses(db)
+    af = dict(min_match=min_match, level=level, employment_type=employment_type, max_years=max_years)
+    base["job_ids"] = _analysis_filter_ids(analyses, **af)
 
     def _counts(col, drop):
         """(value, count) rows for one column with that column's own filter lifted."""
@@ -677,7 +797,21 @@ def job_facets(
         "locations": locations,
         "arrangements": arrangements,
         "score_bands": score_bands,
+        "levels": _analysis_facet(db, base, analyses, af, "experience_level", "level"),
+        "employment_types": _analysis_facet(db, base, analyses, af, "employment_type", "employment_type"),
     }
+
+
+def _analysis_facet(db, base, analyses, af, field, kwarg):
+    """Counts of one analysis field over analyzed jobs, with that field's own filter lifted."""
+    ids = _analysis_filter_ids(analyses, **{**af, kwarg: None})
+    kw = dict(base, job_ids=list(analyses) if ids is None else ids)
+    counts = {}
+    for (jid,) in _apply_common_filters(db.query(Job.id), **kw).all():
+        v = _norm_label((analyses[jid].analysis or {}).get(field))
+        if v:
+            counts[v] = counts.get(v, 0) + 1
+    return [{"name": n, "count": c} for n, c in sorted(counts.items(), key=lambda x: (-x[1], x[0]))]
 
 
 @router.post("/save-from-extension")
@@ -1213,7 +1347,7 @@ def _normalize_report(report, best_cv):
 
 
 def _job_to_dict(j: Job, tailored_resume_id=None, in_flight: list[str] | None = None,
-                 in_flight_detail: list[dict] | None = None) -> dict:
+                 in_flight_detail: list[dict] | None = None, role_match: dict | None = None) -> dict:
     scores = j.cv_scores or {}
     numeric_scores = [v for v in scores.values() if isinstance(v, (int, float))]
     best_score = max(numeric_scores) if numeric_scores else 0
@@ -1256,4 +1390,6 @@ def _job_to_dict(j: Job, tailored_resume_id=None, in_flight: list[str] | None = 
         # Same ops as in_flight, with the run's meta (which résumés a score covers,
         # which base a tailor copies from).
         "in_flight_detail": in_flight_detail or [],
+        # the evidence-backed Copilot Role Match (latest analysis), or None when unanalyzed
+        "role_match": role_match,
     }

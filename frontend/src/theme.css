@@ -1460,6 +1460,103 @@
   --title-bar:none; --title-bar-ink:var(--heading-ink);
 }
 
+/* clean — the product UI and the default theme: neutral greys, white surfaces on
+   a very light grey page, one restrained teal, sans everywhere (the display slot
+   included, so no serif headings), ring score marks and a 13px body floor (the
+   small --t-* stops are lifted). Same name set in both blocks, modelled on saas. */
+.jn-v2[data-theme="clean"] {
+  --ring-shift-sm:1px; --ring-shift-md:1px; --ring-label-shift:0px;
+  --bg:#f5f6f8; --surface:#ffffff; --surface-2:#f2f4f7; --line:#e4e7ec; --line-soft:#eef0f3;
+  --line-strong:#98a2b3; --edge:#d0d5dd; --track:#e4e7ec;
+  --text:#101828; --text-2:#344054; --muted:#667085; --ink-2:#1d2939;
+  --accent:#0f766e; --accent-ink:#ffffff; --accent-soft:#e6f4f1;
+  --good:#067647; --warn:#b54708; --warn-soft:#fffaeb; --warn-line:#f5c56b;
+  --bad:#d92d20; --bad-soft:#fef3f2; --bad-faint:#fffbfa;
+  --change-soft:#c6efe4; --change-bg:#f5fcfa; --change-ink:var(--good); --hover-soft:#f9fafb;
+  --ring-accent:rgba(15,118,110,.22); --scrim:rgba(16,24,40,.46); --recessed:#fafbfc;
+  --stage-applied:#1570ef; --stage-interview:#b54708; --stage-offer:#067647; --stage-rejected:#d92d20; --stage-new:#98a2b3;
+  --series-new:#b88217;
+  --amber-bg:#fffaeb; --amber-line:#f0d49a; --amber-line-soft:#f9eccb; --amber-hover:#fef6e0;
+  --sand:#d0d5dd; --gold:#dc9f2a; --funnel-low:#84d3c6; --funnel-mid:#0f766e;
+  --toast-ok-bg:#ecfdf3; --toast-ok-line:#75e0a7; --toast-ok-ink:#067647;
+  --toast-bad-bg:#fef3f2; --toast-bad-line:#fda29b; --toast-bad-ink:#b42318;
+  --rail:#101828; --rail-text:#d0d5dd; --rail-dim:#98a2b3; --rail-accent:#5fe9d0; --rail-line:#1d2939; --rail-ink:#ffffff;
+  --serif:'Geist','Segoe UI',system-ui,sans-serif;
+  --sans:'Geist','Segoe UI',system-ui,sans-serif;
+  --mono:'Geist Mono',Consolas,ui-monospace,monospace;
+  --radius-mark:3px; --radius-inline:4px; --radius-mini:4px; --radius-field:8px; --radius-row:8px; --radius-cell:8px; --radius-card:12px; --radius-menu:10px; --radius-modal:14px; --radius-control:99px; --radius-rail-item:8px;
+  --bw-hair:1px; --bw-control:1px; --bw-panel:1px;
+  --shadow-modal:0 20px 48px rgba(16,24,40,.18); --shadow-menu:0 8px 24px rgba(16,24,40,.10), 0 0 0 1px var(--line); --shadow-pop:0 8px 24px rgba(16,24,40,.12); --shadow-toast:0 8px 24px rgba(16,24,40,.14), 0 0 0 1px var(--line); --shadow-drawer:-12px 0 32px rgba(16,24,40,.12);
+  --btn-shadow:none; --pill-shadow:none; --field-shadow:none; --card-shadow:0 1px 2px rgba(16,24,40,.04); --seg-on-shadow:0 1px 2px rgba(16,24,40,.08);
+  --t-7-5:7.5px; --t-9:9.5px; --t-9-5:10.5px; --t-10:11px; --t-10-5:12px; --t-11:12px; --t-11-5:12.5px; --t-12:13px; --t-12-5:13px; --t-13:13.5px; --t-13-5:14px; --t-14:14px; --t-15:15px; --t-15-5:15.5px; --t-16:16px; --t-17:17px; --t-18:18px; --t-19:19px; --t-22:22px; --t-30:22px;
+  --label-size:12px; --label-size-lg:12.5px; --tag-size:11px;
+  --btn-weight:600; --title-weight:650; --label-weight:500; --label-tracking:0; --label-tracking-strip:0; --tag-tracking:0; --label-case:none; --display-tracking:-.01em; --label-tracking-scale:0;
+  --btn-primary-hover-bg:color-mix(in oklab, var(--btn-primary-bg) 88%, black); --btn-primary-pressed-bg:color-mix(in oklab, var(--btn-primary-bg) 78%, black); --btn-danger-hover-bg:color-mix(in oklab, var(--btn-danger-bg) 88%, black); --btn-danger-pressed-bg:color-mix(in oklab, var(--btn-danger-bg) 78%, black); --pressed-shift:none; --pressed-wash:var(--line-soft);
+  --motion-fast:.12s; --motion-mid:.2s; --ease:cubic-bezier(.2,.7,.2,1);
+  --disabled-opacity:.5; --disabled-ink:var(--muted); --disabled-engrave:none;
+  --input-border-error:var(--bad); --input-ring-error:0 0 0 3px var(--bad-soft);
+  --row-hover:var(--surface-2); --card-border-hover:var(--line-strong);
+  --row-selected:var(--surface-2); --row-selected-ink:inherit; --row-selected-edge:none; --row-line-style:solid; --divider:1px solid var(--line);
+  --rail-active-bg:var(--accent-soft); --rail-active-ink:var(--accent); --rail-active-mark:3px solid transparent; --rail-count-active:var(--accent); --rail-item-inset:0;
+  --focus-shadow:0 0 0 3px var(--ring-accent), 0 0 0 1px var(--accent); --focus-outline:none;
+  --bevel-raised-border:none; --bevel-raised-color:transparent; --bevel-raised-shadow:none; --bevel-inset-border:none; --bevel-inset-color:transparent; --bevel-inset-shadow:none; --bevel-highlight:transparent; --bevel-shadow:transparent;
+  --ai:var(--accent); --ai-ink:var(--accent-ink); --ai-soft:var(--accent-soft); --btn-ai-bg:var(--ai); --btn-ai-ink:var(--ai-ink);
+  --btn-ai-hover-bg:color-mix(in oklab, var(--ai) 88%, black); --btn-ai-pressed-bg:color-mix(in oklab, var(--ai) 78%, black);
+  --numeral-face:var(--sans); --numeral-variant:tabular-nums;
+  --sc-hi-bg:var(--accent-soft); --sc-hi:var(--good); --sc-mid-bg:var(--warn-soft); --sc-mid:var(--warn); --sc-lo-bg:var(--bad-soft); --sc-lo:var(--bad); --sc-none-bg:var(--surface-2); --sc-none:var(--muted);
+  --ring-variant:ring; --count-shift:0px; --kpi-shift:0px; --ctl-line:1.35;
+  --seg-dot-on:var(--accent); --seg-dot-off:var(--line-strong);
+  --input-bg:var(--surface); --input-border-hover:var(--line-strong);
+  --chip-bg:var(--surface); --chip-ink-hover:var(--accent);
+  --title-bar:none; --title-bar-ink:var(--heading-ink);
+}
+.jn-v2[data-theme="clean"][data-appearance="dark"] {
+  --ring-shift-sm:1px; --ring-shift-md:1px; --ring-label-shift:0px;
+  --bg:#0c111d; --surface:#161b26; --surface-2:#1f242f; --line:#2a303c; --line-soft:#1f242f;
+  --line-strong:#4b5565; --edge:#373e4b; --track:#2a303c;
+  --text:#f5f5f6; --text-2:#cecfd2; --muted:#94969c; --ink-2:#e4e5e7;
+  --accent:#2ed3b7; --accent-ink:#0c111d; --accent-soft:#0e2d2a;
+  --good:#47cd89; --warn:#fdb022; --warn-soft:#271d0b; --warn-line:#7a5a1a;
+  --bad:#f97066; --bad-soft:#2c1614; --bad-faint:#231311;
+  --change-soft:#12453f; --change-bg:#0e1f1d; --change-ink:var(--good); --hover-soft:#1f242f;
+  --ring-accent:rgba(46,211,183,.24); --scrim:rgba(0,0,0,.6); --recessed:#121722;
+  --stage-applied:#53b1fd; --stage-interview:#fdb022; --stage-offer:#47cd89; --stage-rejected:#f97066; --stage-new:#4b5565;
+  --series-new:#a8741a;
+  --amber-bg:#271f0e; --amber-line:#4d3d1c; --amber-line-soft:#382d15; --amber-hover:#302611;
+  --sand:#4b5565; --gold:#d9a53a; --funnel-low:#107569; --funnel-mid:#5fe9d0;
+  --toast-ok-bg:#0d2a1e; --toast-ok-line:#1c6b4a; --toast-ok-ink:#47cd89;
+  --toast-bad-bg:#2c1614; --toast-bad-line:#7a2e28; --toast-bad-ink:#f97066;
+  --rail:#070a12; --rail-text:#cecfd2; --rail-dim:#94969c; --rail-accent:#5fe9d0; --rail-line:#1f242f; --rail-ink:#ffffff;
+  --serif:'Geist','Segoe UI',system-ui,sans-serif;
+  --sans:'Geist','Segoe UI',system-ui,sans-serif;
+  --mono:'Geist Mono',Consolas,ui-monospace,monospace;
+  --radius-mark:3px; --radius-inline:4px; --radius-mini:4px; --radius-field:8px; --radius-row:8px; --radius-cell:8px; --radius-card:12px; --radius-menu:10px; --radius-modal:14px; --radius-control:99px; --radius-rail-item:8px;
+  --bw-hair:1px; --bw-control:1px; --bw-panel:1px;
+  --shadow-modal:0 20px 48px rgba(0,0,0,.55); --shadow-menu:0 8px 24px rgba(0,0,0,.45), 0 0 0 1px var(--line); --shadow-pop:0 8px 24px rgba(0,0,0,.5); --shadow-toast:0 8px 24px rgba(0,0,0,.45), 0 0 0 1px var(--line); --shadow-drawer:-12px 0 32px rgba(0,0,0,.45);
+  --btn-shadow:none; --pill-shadow:none; --field-shadow:none; --card-shadow:none; --seg-on-shadow:none;
+  --t-7-5:7.5px; --t-9:9.5px; --t-9-5:10.5px; --t-10:11px; --t-10-5:12px; --t-11:12px; --t-11-5:12.5px; --t-12:13px; --t-12-5:13px; --t-13:13.5px; --t-13-5:14px; --t-14:14px; --t-15:15px; --t-15-5:15.5px; --t-16:16px; --t-17:17px; --t-18:18px; --t-19:19px; --t-22:22px; --t-30:22px;
+  --label-size:12px; --label-size-lg:12.5px; --tag-size:11px;
+  --btn-weight:600; --title-weight:650; --label-weight:500; --label-tracking:0; --label-tracking-strip:0; --tag-tracking:0; --label-case:none; --display-tracking:-.01em; --label-tracking-scale:0;
+  --btn-primary-hover-bg:color-mix(in oklab, var(--btn-primary-bg) 88%, white); --btn-primary-pressed-bg:color-mix(in oklab, var(--btn-primary-bg) 78%, white); --btn-danger-hover-bg:color-mix(in oklab, var(--btn-danger-bg) 88%, white); --btn-danger-pressed-bg:color-mix(in oklab, var(--btn-danger-bg) 78%, white); --pressed-shift:none; --pressed-wash:var(--line-soft);
+  --motion-fast:.12s; --motion-mid:.2s; --ease:cubic-bezier(.2,.7,.2,1);
+  --disabled-opacity:.5; --disabled-ink:var(--muted); --disabled-engrave:none;
+  --input-border-error:var(--bad); --input-ring-error:0 0 0 3px var(--bad-soft);
+  --row-hover:var(--surface-2); --card-border-hover:var(--line-strong);
+  --row-selected:var(--surface-2); --row-selected-ink:inherit; --row-selected-edge:none; --row-line-style:solid; --divider:1px solid var(--line);
+  --rail-active-bg:var(--accent-soft); --rail-active-ink:var(--accent); --rail-active-mark:3px solid transparent; --rail-count-active:var(--accent); --rail-item-inset:0;
+  --focus-shadow:0 0 0 2px var(--accent); --focus-outline:none;
+  --bevel-raised-border:none; --bevel-raised-color:transparent; --bevel-raised-shadow:none; --bevel-inset-border:none; --bevel-inset-color:transparent; --bevel-inset-shadow:none; --bevel-highlight:transparent; --bevel-shadow:transparent;
+  --ai:var(--accent); --ai-ink:var(--accent-ink); --ai-soft:var(--accent-soft); --btn-ai-bg:var(--ai); --btn-ai-ink:var(--ai-ink);
+  --btn-ai-hover-bg:color-mix(in oklab, var(--ai) 88%, white); --btn-ai-pressed-bg:color-mix(in oklab, var(--ai) 78%, white);
+  --numeral-face:var(--sans); --numeral-variant:tabular-nums;
+  --sc-hi-bg:var(--accent-soft); --sc-hi:var(--good); --sc-mid-bg:var(--warn-soft); --sc-mid:var(--warn); --sc-lo-bg:var(--bad-soft); --sc-lo:var(--bad); --sc-none-bg:var(--surface-2); --sc-none:var(--muted);
+  --ring-variant:ring; --count-shift:0px; --kpi-shift:0px; --ctl-line:1.35;
+  --seg-dot-on:var(--accent); --seg-dot-off:var(--line-strong);
+  --input-bg:var(--surface); --input-border-hover:var(--line-strong);
+  --chip-bg:var(--surface); --chip-ink-hover:var(--accent);
+  --title-bar:none; --title-bar-ink:var(--heading-ink);
+}
+
 /* win98 — round-5 rework (Design "Win98 review/REWORK.md", 2026-09-05).
    --bg is now the WINDOW CHROME grey, not the desktop teal: content used to sit
    straight on the desktop, which was the single biggest colour fault. The
@@ -1882,6 +1979,25 @@
 .v2-pill { cursor:pointer; }
 .v2-navlink { cursor:pointer; text-decoration:none; transition:background .12s,color .12s; }
 .v2-navlink:hover { background:var(--navlink-hover-bg) !important; color:var(--navlink-hover-ink) !important; }
+/* Shell's sidebar item. `a.` keeps it above `.jn-v2 a` / `a:hover`; the active
+   item is whatever Shell marks aria-current="page". */
+.jn-v2 a.v2-sidenav { display:flex; align-items:center; gap:10px; height:36px; padding:0 10px; border-radius:var(--radius-row); color:var(--text-2); font-size:var(--t-13-5); font-weight:var(--weight-medium); text-decoration:none; transition:background .12s,color .12s; }
+.jn-v2 a.v2-sidenav.v2-sidenav-sm { height:30px; font-size:var(--t-12-5); font-weight:400; color:var(--muted); }
+.jn-v2 a.v2-sidenav:hover { background:var(--row-hover); color:var(--text); }
+.jn-v2 a.v2-sidenav[aria-current="page"] { background:var(--accent-soft); color:var(--accent); }
+.jn-v2 a.v2-sidenav:focus-visible { outline:none; box-shadow:var(--focus-shadow); }
+/* the Jobs feed's card: a quiet border that firms up under the pointer */
+.jn-v2 .v2-jobcard { transition:border-color .12s, box-shadow .12s; }
+.jn-v2 .v2-jobcard:hover { border-color:var(--card-border-hover) !important; }
+/* tab strips (JobDetail): underline on the active tab */
+.jn-v2 .v2-tabbtn { display:flex; align-items:center; gap:6px; padding:0 2px; background:none; border:0; border-bottom:2px solid transparent; font:inherit; font-size:var(--t-13-5); font-weight:var(--weight-medium); color:var(--muted); cursor:pointer; }
+.jn-v2 .v2-tabbtn:hover { color:var(--text); }
+.jn-v2 .v2-tabbtn[aria-selected="true"] { color:var(--text); border-bottom-color:var(--accent); }
+.jn-v2 .v2-tabbtn:focus-visible { outline:none; box-shadow:var(--focus-shadow); }
+/* Profile's section list */
+.jn-v2 .v2-profnav:hover { background:var(--row-hover); }
+/* flat table rows (Resume list) */
+.jn-v2 .v2-trow:hover { background:var(--row-hover); }
 .v2-navdark { text-decoration:none; cursor:pointer; transition:color .12s,border-color .12s,background .12s; }
 .v2-navdark:hover { color:var(--rail-ink) !important; }   /* inline colour on every rail control beats a bare rule */
 .v2-appearancebtn:hover { background:var(--rail-hover) !important; }

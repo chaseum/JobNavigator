@@ -262,7 +262,7 @@ export default function Profile() {
         <nav style={{ width: 210, borderRight: '1px solid var(--line)', padding: '12px 8px', display: 'flex', flexDirection: 'column', gap: 2, overflow: 'auto' }}>
           {NAV.map(([id, label]) => (
             <div key={id} role="button" tabIndex={0} onClick={() => setSection(id)} onKeyDown={(e) => e.key === 'Enter' && setSection(id)}
-              className="v2-act" style={{ display: 'flex', padding: '6px 10px', borderRadius: 'var(--radius-row)', cursor: 'pointer', fontSize: 13,
+              className="v2-profnav" style={{ display: 'flex', padding: '6px 10px', borderRadius: 'var(--radius-row)', cursor: 'pointer', fontSize: 13,
                 background: section === id ? 'var(--accent-soft)' : undefined, color: section === id ? 'var(--accent)' : 'var(--text)' }}>
               <span style={{ flex: 1 }}>{label}</span>
               {counts[id] ? <Helper size="xs">{counts[id]}</Helper> : null}

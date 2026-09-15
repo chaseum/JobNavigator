@@ -67,7 +67,7 @@ describe('storage migration', () => {
     expect(attrs().appearance).toBe('dark')
     expect(attrs().dark).toBe(true)
     // 'dark' is not a palette name, so the theme falls back rather than painting nothing
-    expect(attrs().theme).toBe('default')
+    expect(attrs().theme).toBe('clean')
   })
 
   it('(a) the same for "light" and "system"', async () => {
@@ -89,7 +89,7 @@ describe('storage migration', () => {
     await load({ [LEGACY_THEME_KEY]: 'chartreuse' })
     expect(localStorage.getItem(THEME_KEY)).toBe('chartreuse')
     expect(localStorage.getItem(LEGACY_THEME_KEY)).toBeNull()
-    expect(attrs().theme).toBe('default')
+    expect(attrs().theme).toBe('clean')
   })
 
   it('(c) both at once: appearance is read out BEFORE the skin overwrites the key', async () => {
@@ -120,7 +120,7 @@ describe('storage migration', () => {
   it('(d) an empty store settles on light and persists it', async () => {
     await load({})
     expect(localStorage.getItem(APPEARANCE_KEY)).toBe('light')
-    expect(attrs()).toEqual({ appearance: 'light', theme: 'default', dark: false })
+    expect(attrs()).toEqual({ appearance: 'light', theme: 'clean', dark: false })
   })
 
   it('(e) an already-valid appearance is never overwritten by the legacy keys', async () => {
@@ -155,7 +155,7 @@ describe('theme validation', () => {
   it('falls back to default for an unknown, absent or null stored value', async () => {
     for (const v of ['chartreuse', '', 'null', 'DEFAULT', undefined]) {
       await load(v === undefined ? {} : { [THEME_KEY]: v })
-      expect(attrs().theme, String(v)).toBe('default')
+      expect(attrs().theme, String(v)).toBe('clean')
     }
   })
 })
@@ -170,7 +170,7 @@ describe('themeOptions', () => {
       expect(opts.map((o) => o[0]), t).toEqual(THEME_PICKER)
       expect(new Set(opts.map((o) => o[0])).size, t).toBe(opts.length)
     }
-    expect(themeOptions('default')[0]).toEqual(['default', THEME_LABEL.default])
+    expect(themeOptions('clean')[0]).toEqual(['clean', THEME_LABEL.clean])
   })
   it('prepends a hidden current theme so the Settings box never reads blank', async () => {
     const { themeOptions, THEME_PICKER, THEME_LABEL, THEMES } = await load({})
@@ -223,7 +223,7 @@ describe('systemPrefersDark / resolveMode', () => {
   it('a stored "system" boots dark when the OS is dark', async () => {
     mockMatchMedia(true)
     await load({ [APPEARANCE_KEY]: 'system' })
-    expect(attrs()).toEqual({ appearance: 'dark', theme: 'default', dark: true })
+    expect(attrs()).toEqual({ appearance: 'dark', theme: 'clean', dark: true })
   })
 })
 
@@ -234,7 +234,7 @@ describe('setMode / setTheme / cycleMode', () => {
     setMode('dark')
     expect(localStorage.getItem(APPEARANCE_KEY)).toBe('dark')
     expect(localStorage.getItem(LEGACY_KEY)).toBe('true')
-    expect(attrs()).toEqual({ appearance: 'dark', theme: 'default', dark: true })
+    expect(attrs()).toEqual({ appearance: 'dark', theme: 'clean', dark: true })
 
     setMode('light')
     expect(localStorage.getItem(APPEARANCE_KEY)).toBe('light')
@@ -270,8 +270,8 @@ describe('setMode / setTheme / cycleMode', () => {
     setTheme('cobalt')
     for (const bad of ['chartreuse', '', null, undefined, 42]) {
       setTheme(bad)
-      expect(localStorage.getItem(THEME_KEY), String(bad)).toBe('default')
-      expect(attrs().theme, String(bad)).toBe('default')
+      expect(localStorage.getItem(THEME_KEY), String(bad)).toBe('clean')
+      expect(attrs().theme, String(bad)).toBe('clean')
       setTheme('cobalt')
     }
   })
@@ -338,7 +338,7 @@ describe('ls() fallback when localStorage throws', () => {
     try {
       vi.resetModules()
       const m = await import('../theme')
-      expect(attrs()).toEqual({ appearance: 'light', theme: 'default', dark: false })
+      expect(attrs()).toEqual({ appearance: 'light', theme: 'clean', dark: false })
       // the setters swallow the write too, and still move the DOM
       expect(() => m.setMode('dark')).not.toThrow()
       expect(attrs().appearance).toBe('dark')
