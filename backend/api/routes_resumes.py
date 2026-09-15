@@ -1226,7 +1226,7 @@ def check_pdf_size(pdf_bytes: bytes) -> None:
 
 
 async def parse_resume_pdf(pdf_bytes: bytes, db: Session) -> dict:
-    """PDF bytes → structured résumé json_data via pdfplumber + one LLM call; shared by the résumé-shelf import and POST /api/persona/import so both use the same schema/prompt/tracking, raising 422 for unusable PDF text or invalid model JSON and 500 if the LLM call itself fails."""
+    """PDF bytes → structured résumé json_data via pdfplumber and a schema-constrained LLM call."""
     extracted_text = ""
     try:
         import pdfplumber
@@ -1241,46 +1241,45 @@ async def parse_resume_pdf(pdf_bytes: bytes, db: Session) -> dict:
     if len(extracted_text.strip()) < 50:
         raise HTTPException(status_code=422, detail="Could not extract enough text from PDF. It may be image-based.")
 
-    schema_example = '{"header":{"name":"","contact_items":[{"text":"location"},{"text":"email","url":"mailto:email"},{"text":"LinkedIn","url":"linkedin.com/in/..."},{"text":"phone"}]},"summary":"","experience":[{"company":"","title":"","location":"","date":"","description":"","bullets":[]}],"skills":{},"education":[{"school":"","location":"","degree":""}],"projects":[],"publications":[]}'
-
-    system_prompt = "You are a resume parser. Extract structured data from resume text. Return ONLY valid JSON, no markdown fences."
+    system_prompt = (
+        "You are a resume parser. Extract only facts explicitly present in the resume. "
+        "Do not infer or invent missing values. Use empty strings, arrays, and mappings "
+        "for missing information as required by the output schema."
+    )
     user_prompt = (
-        f"Parse this resume text into the following JSON structure. "
-        f"Fill in all fields you can find. Use empty strings for missing fields, empty arrays for missing lists.\n\n"
-        f"Target schema:\n{schema_example}\n\n"
+        "Extract the candidate's header/contact details, summary, experience, skills, "
+        "education, projects, and publications from this resume. Preserve dates and "
+        "bullet wording where possible.\n\n"
         f"Resume text:\n{extracted_text}"
     )
 
-    raw_response = ""
     try:
-        from backend.analyzer.llm_client import call_llm
-        from backend.analyzer.llm_logger import track_llm_call
-        # Determine model for logging — the same resolver call_llm dispatches with.
-        from backend.analyzer.llm_client import resolve_llm_config
-        _cfg = resolve_llm_config("", db=db)
-        _provider, _model = _cfg["provider"], _cfg["model"]
-        async with track_llm_call("pdf", _provider, _model) as _tracker:
-            _resp = await call_llm(prompt=user_prompt, system=system_prompt, max_tokens=2000)
-            _tracker.record(_resp)
-            raw_response = _resp["text"]
+        from backend.analyzer.llm_client import StructuredOutputError, call_structured
+        from backend.analyzer.resume_schema import ResumeImport
 
-        cleaned = raw_response.strip()
-        if cleaned.startswith("```"):
-            first_newline = cleaned.index("\n")
-            cleaned = cleaned[first_newline + 1:]
-        if cleaned.endswith("```"):
-            cleaned = cleaned[:-3]
-        cleaned = cleaned.strip()
-
-        return json.loads(cleaned)
-    except json.JSONDecodeError as e:
-        logger.error(f"LLM returned invalid JSON for PDF import: {e}\nRaw: {raw_response[:500]}")
-        raise HTTPException(status_code=422, detail="LLM returned invalid JSON. Try again or enter data manually.")
+        parsed, _provider, _model = await call_structured(
+            ResumeImport,
+            prompt=user_prompt,
+            system=system_prompt,
+            feature="pdf",
+            max_tokens=6000,
+            temperature=0,
+        )
+        return parsed.model_dump()
+    except StructuredOutputError as e:
+        logger.warning("Structured PDF resume extraction failed validation: %s", str(e)[:1000])
+        raise HTTPException(
+            status_code=422,
+            detail="Resume extraction returned data that did not match the expected format. Try again or enter the data manually.",
+        )
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error(f"LLM call failed during PDF import: {e}")
-        raise HTTPException(status_code=500, detail=f"LLM extraction failed: {str(e)}")
+    except Exception:
+        logger.exception("LLM provider failed during PDF resume import")
+        raise HTTPException(
+            status_code=500,
+            detail="Resume extraction failed. Check that the configured LLM provider is reachable and try again.",
+        )
 
 
 @router.post("/import-pdf", status_code=201)

@@ -107,24 +107,25 @@ async def test_ollama_structured_call_sends_the_schema_and_temperature_zero(test
     from backend.analyzer.llm_client import call_structured
     from backend.copilot.schemas import EvidenceMapping
     _settings(test_db, llm_provider="ollama", llm_model="any-local-model", ollama_base_url="http://ollama.test:11434")
-    mock_httpx["response"].json.return_value = {"response": json.dumps(
-        {"matches": [{"requirement_id": "r1", "status": "MATCHED", "source_fact_ids": ["project_1"]}]})}
+    mock_httpx["response"].json.return_value = {"message": {"content": json.dumps(
+        {"matches": [{"requirement_id": "r1", "status": "MATCHED", "source_fact_ids": ["project_1"]}]})}}
 
     out, provider, model = await call_structured(EvidenceMapping, "p", "s", feature="copilot")
     assert provider == "ollama" and model == "any-local-model"
     assert out.matches[0].source_fact_ids == ["project_1"]
     url, = mock_httpx["client"].post.call_args.args
     body = mock_httpx["client"].post.call_args.kwargs["json"]
-    assert url == "http://ollama.test:11434/api/generate"
+    assert url == "http://ollama.test:11434/api/chat"
     assert body["format"] == EvidenceMapping.model_json_schema()
     assert body["options"]["temperature"] == 0
+    assert body["think"] is False
 
 
 async def test_structured_output_that_fails_the_schema_is_an_error_not_a_guess(test_db, mock_httpx):
     from backend.analyzer.llm_client import StructuredOutputError, call_structured
     from backend.copilot.schemas import EvidenceMapping
     _settings(test_db, llm_provider="ollama", llm_model="m")
-    mock_httpx["response"].json.return_value = {"response": json.dumps({"matches": [{"status": "PROBABLY"}]})}
+    mock_httpx["response"].json.return_value = {"message": {"content": json.dumps({"matches": [{"status": "PROBABLY"}]})}}
     with pytest.raises(StructuredOutputError):
         await call_structured(EvidenceMapping, "p", "s")
     assert mock_httpx["client"].post.call_count == 2

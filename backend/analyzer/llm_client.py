@@ -462,22 +462,32 @@ def ollama_base_url(db=None) -> str:
 
 async def _call_ollama(prompt: str, system: str, model: str, max_tokens: int,
                        fmt: dict | None = None, temperature: float | None = None) -> dict:
-    """Call the local Ollama instance; `fmt` is a JSON schema that constrains decoding. Returns {text, usage}."""
+    """Call Ollama; structured calls use chat so Qwen thinking can be disabled with a JSON schema."""
     import httpx
     if not model:
         raise NonRetryableLLMError("No Ollama model configured — pick one in Settings › AI")
     options = {"num_predict": max_tokens}
     if temperature is not None:
         options["temperature"] = temperature
+    endpoint = "/api/generate"
     body = {"model": model, "prompt": prompt, "system": system, "stream": False, "options": options}
     if fmt is not None:
+        endpoint = "/api/chat"
+        body = {
+            "model": model,
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+            "stream": False,
+            "options": options,
+            "think": False,
+        }
         body["format"] = fmt
     async with httpx.AsyncClient(timeout=600) as client:
-        response = await client.post(f"{ollama_base_url()}/api/generate", json=body)
+        response = await client.post(f"{ollama_base_url()}{endpoint}", json=body)
         response.raise_for_status()
         data = response.json()
+    text = data["message"]["content"] if fmt is not None else data["response"]
     return {
-        "text": data["response"].strip(),
+        "text": text.strip(),
         "usage": {
             "input_tokens": data.get("prompt_eval_count", 0),
             "output_tokens": data.get("eval_count", 0),

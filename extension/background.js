@@ -56,7 +56,7 @@ function setupFrameRules() {
         ]
       }, () => {
         if (chrome.runtime.lastError) {
-          console.error('Failed to add rules:', chrome.runtime.lastError);
+          console.error(`Failed to add rules: ${chrome.runtime.lastError?.message || 'unknown error'}`);
         } else {
           console.log('Frame header rules installed for frames opened by', host);
         }
