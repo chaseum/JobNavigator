@@ -272,8 +272,9 @@ async def audit_resume(resume: dict, ix: FactIndex, jd_tech=(), jd_domain=(), us
                 f"bullet_id {b['id']}: \"{b['text']}\"\nsources:\n{ix.text([s for s in b['source_fact_ids'] if s in allowed]) or '(none)'}"
                 for b in to_ask)
             try:
+                # 2000 truncated qwen3:8b mid-reason on a four-bullet entry ("Unterminated string"), leaving the bullets unaudited
                 out, _, _ = await call_structured(ResumeAudit, AUDIT_PROMPT.replace("<<BULLETS>>", block), AUDIT_SYSTEM,
-                                                  feature="copilot", max_tokens=2000, job_id=job_id)
+                                                  feature="copilot", max_tokens=6000, job_id=job_id)
                 verdicts = {c.bullet_id: c for c in out.claims}
             except Exception as ex:   # a failed audit means "review it yourself", never "passed"
                 logger.warning(f"audit call failed: {ex}")
@@ -296,13 +297,16 @@ PLAN_SYSTEM = "You choose which verified facts belong on a résumé for one job.
 PLAN_PROMPT = """Choose the content of a résumé for this job.
 
 Rules:
-- Use only fact ids that appear in square brackets below.
+- Use only fact ids that appear in square brackets below, written without the brackets: "project_4", not "[project_4]".
 - entries: the experience, internship and research entries to write bullets for, and the projects to show. <<PROJECT_RULE>>
 - bullet_sources for an entry: at most <<MAX>> bullets. Each bullet is a list of ids from THAT entry: the entry id itself, achievements indented under it, or skills whose evidence names it. Prefer facts that support the requirements below, and quantified outcomes.
 - skill_ids: skill facts most relevant to this job, most relevant first.
 
 REQUIREMENTS (status, then the facts that support them):
 <<EVIDENCE>>
+
+GAPS TO CLOSE (verified facts the base résumé omits or under-shows for this job; prefer them):
+<<GAPS>>
 
 FACTS:
 <<FACTS>>"""
@@ -323,7 +327,7 @@ JOB REQUIREMENTS THIS ENTRY SUPPORTS (use their wording only where it accurately
 <<REQS>>
 
 Rules:
-- source_fact_ids: the ids the bullet actually uses, taken from its line above.
+- source_fact_ids: the ids the bullet actually uses, taken from its line above, without brackets ("achievement_12", not "[achievement_12]").
 - requirement_ids: ids of the requirements the bullet speaks to, if any.
 - You may clarify, shorten, reorder clauses, combine the facts on one line, and lead with the strongest real outcome.
 - You may not invent tools, metrics, responsibilities or scope, claim leadership or production use the facts do not state, or turn exposure into expertise.
@@ -381,7 +385,59 @@ def original_text(ix: FactIndex, group: list) -> str:
     for b in base_bullets(ix, first):
         if b["source_fact_ids"] == [first]:
             return b["text"]
-    return F.fact_headline(f.kind, f.data or {})
+    d = f.data or {}
+    if d.get("description"):
+        return d["description"]
+    if d.get("technologies"):
+        return "Technologies: " + ", ".join(d["technologies"])
+    return F.fact_headline(f.kind, d)
+
+
+def surface_gaps(ix: FactIndex, groups: dict, projects: list, gaps, evidence, policy: str, max_bullets: int) -> list[str]:
+    """Put SAFE_TO_ADD evidence the plan left off onto the page, so surfacing a verified omission never depends on the model noticing.
+
+    Mutates `groups` and `projects`; returns notes. Skills and education are always on the page already.
+    A full entry gives up a bullet that supports no requirement; if every bullet does, nothing is displaced.
+    """
+    supporting = {r for e in evidence or [] if e.get("status") in ("MATCHED", "PARTIAL") for r in e.get("source_fact_ids") or []}
+    parents = {f.id: f for f in ix.facts}
+    notes = []
+    for g in gaps or []:
+        if g.get("gap") != "SAFE_TO_ADD":
+            continue
+        for ref in g.get("profile_evidence") or []:
+            f = ix.by_ref.get(ref)
+            entry_fact = parents.get(f.parent_id) if f is not None and f.kind == "achievement" else f
+            if entry_fact is None or entry_fact.kind not in ENTRY_KINDS:
+                continue
+            entry = F.fact_ref(entry_fact)
+            if entry_fact.kind == "project" and entry not in projects:
+                if policy == "keep":
+                    notes.append(f"{entry} supports {g['requirement_id']}, but the project policy keeps the base projects")
+                    continue
+                if len(projects) >= 3:
+                    drop = next((p for p in reversed(projects) if not (ix.allowed_for(p) & supporting)), None)
+                    if drop is None:
+                        notes.append(f"no room for {entry}: every shown project supports a requirement")
+                        continue
+                    projects.remove(drop)
+                    groups.pop(drop, None)
+                    notes.append(f"replaced project {drop} with {entry} for {g['requirement_id']}")
+                projects.append(entry)
+                groups[entry] = [b["source_fact_ids"] for b in base_bullets(ix, entry, max_bullets)]
+            grp = groups.setdefault(entry, [])
+            if any(ref in x for x in grp):
+                continue
+            if len(grp) >= max_bullets:
+                idx = next((i for i in range(len(grp) - 1, -1, -1) if not set(grp[i]) & supporting), None)
+                if idx is None:
+                    notes.append(f"no room under {entry} for {ref}: every bullet supports a requirement")
+                    continue
+                grp[idx] = [ref]
+            else:
+                grp.append([ref])
+            notes.append(f"added {ref} under {entry} for {g['requirement_id']}")
+    return notes
 
 
 async def rewrite_entry(ix: FactIndex, ref: str, groups: list, requirements: list, evidence_by_req: dict, job_id=None):
@@ -409,8 +465,8 @@ async def rewrite_entry(ix: FactIndex, ref: str, groups: list, requirements: lis
     return bullets, provider, model
 
 
-async def tailor(ix: FactIndex, persona, analysis: dict, evidence: list, settings: dict, job_id=None):
-    """(resume_json, audit, provider, model) for one job."""
+async def tailor(ix: FactIndex, persona, analysis: dict, evidence: list, settings: dict, job_id=None, gaps=None):
+    """(resume_json, audit, provider, model) for one job; `gaps` are the base résumé's SAFE_TO_ADD / SAFE_TO_REPHRASE rows."""
     reqs = analysis.get("requirements") or []
     ev_by = {e["requirement_id"]: e for e in evidence or []}
     evidence_text = "\n".join(
@@ -427,9 +483,12 @@ async def tailor(ix: FactIndex, persona, analysis: dict, evidence: list, setting
     plan, provider, model = await call_structured(
         ResumePlan,
         PLAN_PROMPT.replace("<<PROJECT_RULE>>", project_rule).replace("<<MAX>>", str(max_bullets))
-        .replace("<<EVIDENCE>>", evidence_text or "(none)").replace("<<FACTS>>", F.facts_prompt(ix.facts)),
+        .replace("<<EVIDENCE>>", evidence_text or "(none)").replace("<<FACTS>>", F.facts_prompt(ix.facts))
+        .replace("<<GAPS>>", "\n".join(f"{g['requirement_id']} {g['gap']}: {g['requirement']} <- {', '.join(g.get('profile_evidence') or []) or 'nothing'}"
+                                       for g in gaps or []) or "(none)"),
         PLAN_SYSTEM, feature="copilot", max_tokens=3000, job_id=job_id)
     groups, projects, skills, notes, planned = validate_plan(plan, ix, base_projects, policy, max_bullets)
+    notes += surface_gaps(ix, groups, projects, gaps, evidence, policy, max_bullets)
     if settings.get("skill_ordering") == "profile":
         order = {F.fact_ref(s): i for i, s in enumerate(ix.of_kind("skill"))}
         skills.sort(key=order.get)

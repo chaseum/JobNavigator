@@ -59,7 +59,7 @@ export default function Dashboard() {
         {d && d.profile.unverified > 0 && (
           <Notice tone="quiet"><Helper>{d.profile.unverified} imported fact{d.profile.unverified === 1 ? ' awaits' : 's await'} your review in <RouterLink to="/profile">Profile</RouterLink>.</Helper></Notice>
         )}
-        {d && d.stale_matches > 0 && <Notice tone="quiet"><Helper>{d.stale_matches} Role Match result{d.stale_matches === 1 ? ' is' : 's are'} older than your profile — re-match from the job’s workspace.</Helper></Notice>}
+        {d && d.stale_matches > 0 && <Notice tone="quiet"><Helper>{d.stale_matches} Candidate Fit result{d.stale_matches === 1 ? ' is' : 's are'} older than your profile — re-match from the job’s workspace.</Helper></Notice>}
         {d && (
           <>
             <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
@@ -79,7 +79,7 @@ export default function Dashboard() {
               <List title="Ready to submit" help="The extension filled these. Review and submit on the company’s site." rows={d.apply} empty="None."
                 render={(r) => jobLink(r)} />
             </div>
-            <List title="Top Role Match" help="Evidence coverage of each posting by your verified profile — not an employer ATS score." rows={d.top_matches} empty="Analyze a job to see its match."
+            <List title="Top Candidate Fit" help="How much of each posting your verified profile satisfies — not an employer ATS score." rows={d.top_matches} empty="Analyze a job to see its match."
               render={(r) => jobLink(r, <>{r.stale && <Tag tone="warn">stale</Tag>}<Tag tone={r.score >= 70 ? 'good' : r.score >= 50 ? 'warn' : 'bad'}>{r.score}</Tag></>)} />
           </>
         )}

@@ -8,9 +8,10 @@ import { useEscape, fetchRunOutcome, runFailed, runFailureReason } from '../hook
 import { ago } from '../time'
 import { Button, Check, Helper, IconButton, Input, Menu, MenuItem, Notice, Pill, ScoreRing, SearchInput, Select, ShowMore, Spinner, Tag, scoreTone } from '../ui'
 
-// Jobs: the feed as cards. The one score on screen is the Copilot Role Match —
-// evidence coverage of the posting by the verified profile. Legacy AI scores stay
-// in /classic.
+// Jobs: the feed as cards. The one score on screen is Candidate Fit — how much of
+// the posting the whole verified profile satisfies. Not an ATS score, never mixed
+// with legacy AI scores (those stay in /classic). A stale or failed match shows as
+// such, never as a number.
 
 const PAGE = 30
 const PREFS_KEY = 'jn_jobs_prefs'
@@ -23,7 +24,7 @@ const NO_FILTERS = { location: [], level: [], employment_type: [], arrangement: 
 const DATE_OPTS = [['1', 'Past 24 hours'], ['3', 'Past 3 days'], ['7', 'Past week'], ['30', 'Past month']]
 const YEARS_OPTS = [['1', 'Up to 1 year'], ['3', 'Up to 3 years'], ['5', 'Up to 5 years'], ['10', 'Up to 10 years']]
 const MATCH_OPTS = [['50', '50+'], ['60', '60+'], ['70', '70+'], ['80', '80+']]
-const SORT_OPTS = [['match', 'Best Role Match'], ['date', 'Newest'], ['salary', 'Highest salary']]
+const SORT_OPTS = [['match', 'Best Candidate Fit'], ['date', 'Newest'], ['salary', 'Highest salary']]
 export const ARRANGEMENTS = [['remote', 'Remote'], ['hybrid', 'Hybrid'], ['onsite', 'On-site']]
 export const MATCH_LABEL = { good: 'Strong match', warn: 'Partial match', bad: 'Low match' }
 // generated logo tints: borrowed from the ATS badge hues, which exist in every theme
@@ -74,19 +75,33 @@ const Reason = ({ ok, children }) => (
   </span>
 )
 
-function MatchPanel({ rm, needsDetails, analyzing, onAnalyze }) {
+function MatchPanel({ rm, needsDetails, analyzing, onAnalyze, onRematch }) {
   const score = rm?.score ?? null
   const tone = scoreTone(score)
+  const act = (fn) => (e) => { e?.stopPropagation?.(); fn() }
   return (
     <div style={{
       flex: '0 0 200px', minWidth: 0, padding: '16px 14px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6,
       background: 'var(--recessed)', borderLeft: '1px solid var(--line-soft)', borderRadius: '0 var(--radius-card) var(--radius-card) 0',
     }}>
+      <Helper size="xs" title="Based on everything verified in your Profile. Not an ATS score.">Candidate Fit</Helper>
       {analyzing ? (
         <><ScoreRing busy size="md" /><Helper>Analyzing…</Helper></>
+      ) : rm?.unavailable && !needsDetails ? (
+        <>
+          <ScoreRing value={null} label="—" size="md" ariaLabel="Match unavailable" />
+          <Helper title={rm.unavailable}>Match unavailable</Helper>
+          <Button size="xs" variant="secondary" onClick={act(onRematch)}>Re-match</Button>
+        </>
+      ) : rm?.stale && score != null ? (
+        <>
+          <ScoreRing value={null} label="stale" size="md" ariaLabel="Candidate Fit is stale" />
+          <Helper>{rm.outdated ? 'Old scoring method' : rm.jd_stale ? 'Job details changed' : 'Profile changed'}</Helper>
+          <Button size="xs" variant="secondary" onClick={act(rm.jd_stale ? onAnalyze : onRematch)}>{rm.jd_stale ? 'Re-analyze' : 'Re-match'}</Button>
+        </>
       ) : score != null ? (
         <>
-          <ScoreRing value={score} size="md" ariaLabel={`Role Match ${score} of 100`} />
+          <ScoreRing value={score} size="md" ariaLabel={`Candidate Fit ${score} of 100`} />
           <span style={{ fontSize: 'var(--t-12)', fontWeight: 'var(--weight-semibold)', color: `var(--${tone})` }}>{MATCH_LABEL[tone]}</span>
           <div style={{ alignSelf: 'stretch', display: 'flex', flexDirection: 'column', gap: 2, marginTop: 2 }}>
             {rm.matched.slice(0, 2).map((t) => <Reason key={`m${t}`} ok>{t}</Reason>)}
@@ -94,7 +109,6 @@ function MatchPanel({ rm, needsDetails, analyzing, onAnalyze }) {
           </div>
           <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', justifyContent: 'center' }}>
             {rm.hard_blockers > 0 && <Tag tone="bad" title="Hard requirements your profile does not meet">{rm.hard_blockers} blocker{rm.hard_blockers === 1 ? '' : 's'}</Tag>}
-            {rm.stale && <Tag tone="warn" title="Your profile changed since this match — re-match from the job">stale</Tag>}
           </div>
         </>
       ) : needsDetails ? (
@@ -114,7 +128,7 @@ function MatchPanel({ rm, needsDetails, analyzing, onAnalyze }) {
   )
 }
 
-function JobCard({ job, analyzing, onSave, onHide, onAnalyze }) {
+function JobCard({ job, analyzing, onSave, onHide, onAnalyze, onRematch }) {
   const navigate = useNavigate()
   const rm = job.role_match
   const saved = job.status === 'saved' || !!job.saved
@@ -163,7 +177,7 @@ function JobCard({ job, analyzing, onSave, onHide, onAnalyze }) {
           </Button>
         </div>
       </div>
-      <MatchPanel rm={rm} needsDetails={job.needs_job_details} analyzing={analyzing} onAnalyze={onAnalyze} />
+      <MatchPanel rm={rm} needsDetails={job.needs_job_details} analyzing={analyzing} onAnalyze={onAnalyze} onRematch={onRematch} />
     </article>
   )
 }
@@ -201,7 +215,7 @@ export default function Jobs() {
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState(false)
   const [facets, setFacets] = useState({})
-  const [pending, setPending] = useState({})   // job id -> analyze run id
+  const [pending, setPending] = useState({})   // job id -> { run_id, type }
   const { toasts, push: pushToast, dismiss } = useToasts()
   const jobsRef = useRef(jobs); jobsRef.current = jobs
   const pendingRef = useRef(pending); pendingRef.current = pending
@@ -241,11 +255,11 @@ export default function Jobs() {
     const t = setInterval(async () => {
       const next = { ...pendingRef.current }
       let settled = false
-      for (const [jid, rid] of Object.entries(next)) {
-        const out = await fetchRunOutcome(rid, 'copilot_analyze')
+      for (const [jid, run] of Object.entries(next)) {
+        const out = await fetchRunOutcome(run.run_id, run.type)
         if (!out || out.status === 'running') continue
         delete next[jid]; settled = true
-        if (runFailed(out)) pushToast({ kind: 'error', msg: `Analysis failed — ${runFailureReason(out)}` })
+        if (runFailed(out)) pushToast({ kind: 'error', msg: `${run.type === 'copilot_match' ? 'Re-match' : 'Analysis'} failed — ${runFailureReason(out)}` })
       }
       if (settled) { setPending(next); load(false) }
     }, 3000)
@@ -257,7 +271,8 @@ export default function Jobs() {
   const anyFilter = !!dq || Object.entries(filters).some(([, v]) => (Array.isArray(v) ? v.length : v !== ''))
 
   const patchJob = async (job, changes) => {
-    try { await api.patch(`/jobs/${job.id}`, changes); return true } catch (e) { pushToast({ kind: 'error', msg: errMsg(e, 'Could not update this job') }); load(false); return false }
+    // legacy_score=false: saving here never starts the classic LLM CV scorer
+    try { await api.patch(`/jobs/${job.id}`, changes, { params: { legacy_score: false } }); return true } catch (e) { pushToast({ kind: 'error', msg: errMsg(e, 'Could not update this job') }); load(false); return false }
   }
   const toggleSave = async (job) => {
     const on = !(job.status === 'saved' || job.saved)
@@ -272,13 +287,15 @@ export default function Jobs() {
       pushToast({ kind: 'undo', msg: `Hid “${job.title || 'job'}”`, action: 'Undo', onAction: async () => { await patchJob(job, { status: job.status }); load(false) } })
     }
   }
-  const analyze = async (job) => {
+  const startRun = async (job, type) => {
+    const [path, label] = type === 'copilot_match' ? ['match', 'Re-matching'] : ['analyze', 'Analyzing']
     try {
-      const { data } = await api.post(`/copilot/jobs/${job.id}/analyze`)
-      setPending((p) => ({ ...p, [job.id]: data.run_id }))
-      pushToast({ kind: 'progress', msg: `Analyzing ${job.title || 'job'}…` })
-    } catch (e) { pushToast({ kind: 'error', msg: errMsg(e, 'Analysis could not start') }) }
+      const { data } = await api.post(`/copilot/jobs/${job.id}/${path}`)
+      setPending((p) => ({ ...p, [job.id]: { run_id: data.run_id, type } }))
+      pushToast({ kind: 'progress', msg: `${label} ${job.title || 'job'}…` })
+    } catch (e) { pushToast({ kind: 'error', msg: errMsg(e, `${label} could not start`) }) }
   }
+  const analyze = (job) => startRun(job, 'copilot_analyze')
 
   const statusCount = Object.fromEntries((facets.statuses || []).map((x) => [x.name, x.count]))
   const tabCount = { recommended: (statusCount.new || 0) + (statusCount.saved || 0), saved: statusCount.saved || 0, applied: statusCount.applied || 0 }
@@ -316,13 +333,13 @@ export default function Jobs() {
             ))}
           </FilterChip>
           <FilterChip id="level" open={open} setOpen={setOpen} label={multiLabel('Level', 'level')} active={filters.level.length > 0} onClear={() => setF('level', [])}>
-            {!(facets.levels || []).length && <Helper style={{ padding: '6px 11px', display: 'block' }}>Seniority comes from Role Match analysis. Analyze jobs to fill this list.</Helper>}
+            {!(facets.levels || []).length && <Helper style={{ padding: '6px 11px', display: 'block' }}>Seniority comes from job analysis. Analyze jobs to fill this list.</Helper>}
             {(facets.levels || []).map((x) => (
               <MenuItem key={x.name} icon={<Check checked={filters.level.includes(x.name)} />} hint={x.count} onClick={() => toggleIn('level', x.name)}>{cap(x.name)}</MenuItem>
             ))}
           </FilterChip>
           <FilterChip id="employment" open={open} setOpen={setOpen} label={multiLabel('Employment type', 'employment_type')} active={filters.employment_type.length > 0} onClear={() => setF('employment_type', [])}>
-            {!(facets.employment_types || []).length && <Helper style={{ padding: '6px 11px', display: 'block' }}>Employment type comes from Role Match analysis. Analyze jobs to fill this list.</Helper>}
+            {!(facets.employment_types || []).length && <Helper style={{ padding: '6px 11px', display: 'block' }}>Employment type comes from job analysis. Analyze jobs to fill this list.</Helper>}
             {(facets.employment_types || []).map((x) => (
               <MenuItem key={x.name} icon={<Check checked={filters.employment_type.includes(x.name)} />} hint={x.count} onClick={() => toggleIn('employment_type', x.name)}>{cap(x.name)}</MenuItem>
             ))}
@@ -350,7 +367,7 @@ export default function Jobs() {
       <div className="v2-scroll" style={{ flex: 1, overflow: 'auto' }}>
         <div style={{ maxWidth: 1180, margin: '0 auto', padding: '16px 24px 40px', display: 'flex', flexDirection: 'column', gap: 12 }}>
           {(filters.level.length > 0 || filters.employment_type.length > 0 || filters.max_years !== '' || filters.min_match !== '') && (
-            <Helper>Level, employment type, experience and match filters read Role Match analysis, so jobs that have not been analyzed are hidden while they are set.</Helper>
+            <Helper>Level, employment type, experience and fit filters read job analysis, so jobs that have not been analyzed are hidden while they are set.</Helper>
           )}
           {err ? (
             <Notice tone="bad" action={<Button size="sm" variant="secondary" onClick={() => load(false)}>Retry</Button>}>
@@ -362,7 +379,7 @@ export default function Jobs() {
             </Notice>
           ) : jobs.map((j) => (
             <JobCard key={j.id} job={j} analyzing={!!pending[j.id] || (j.in_flight || []).some((t) => t === 'copilot_analyze' || t === 'copilot_match')}
-              onSave={() => toggleSave(j)} onHide={() => hide(j)} onAnalyze={() => analyze(j)} />
+              onSave={() => toggleSave(j)} onHide={() => hide(j)} onAnalyze={() => analyze(j)} onRematch={() => startRun(j, 'copilot_match')} />
           ))}
           {!err && jobs.length < total && (
             <ShowMore n={Math.min(PAGE, total - jobs.length)} onClick={() => load(true)} />

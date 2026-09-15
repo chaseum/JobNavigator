@@ -1,4 +1,4 @@
-"""Copilot workflow per job: analysis, Role Match, gaps, adding context, privacy."""
+"""Copilot workflow per job: analysis, Candidate Fit, Resume Applicability audits, adding context, privacy."""
 import logging
 import hashlib
 import uuid as _uuid
@@ -8,7 +8,6 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from backend.copilot import facts as F
-from backend.copilot import matching as M
 from backend.copilot.analysis import latest_record, run_analysis, run_match
 from backend.job_monitor import JobAlreadyRunningError, is_running, launch_background
 from backend.models.db import Application, CandidateFact, Job, get_db
@@ -56,17 +55,31 @@ async def rematch_job(job_id: str, db: Session = Depends(get_db)):
     return _launch("copilot_match", run_match, job_id)
 
 
-def current_resume_context(db, job_id):
-    """(text, fact refs) of the résumé the gaps are measured against; (None, None) until one exists."""
-    try:
-        from backend.copilot.versions import resume_context_for_job
-    except ImportError:
-        return None, None
-    return resume_context_for_job(db, job_id)
+def match_is_outdated(match) -> bool:
+    """A match computed by the old Role Match scorer (component weights, parser health mixed in); it must be re-run."""
+    return bool(match) and "formula" not in match
+
+
+@router.post("/jobs/{job_id}/resume-audit")
+def audit_resumes(job_id: str, body: dict | None = None, db: Session = Depends(get_db)):
+    """Run and store the Resume Applicability audit for the base and tailored résumés (or `version_ids`)."""
+    from backend.copilot.resume_audits import audit_job
+    _job_or_404(db, job_id)
+    rec = latest_record(db, job_id)
+    if rec is None or rec.evidence is None:
+        raise HTTPException(400, "analyze and match the job first")
+    ids = [str(x) for x in (body or {}).get("version_ids") or []]
+    for x in ids:
+        try:
+            _uuid.UUID(x)
+        except ValueError:
+            raise HTTPException(404, "résumé version not found")
+    out = audit_job(job_id, ids or None)
+    return {vid: {"score": r["score"], "maximum": r["maximum"], "kind": r["kind"]} for vid, r in out.items()}
 
 
 @router.get("/jobs/{job_id}")
-def job_workspace(job_id: str, db: Session = Depends(get_db)):
+def job_workspace(job_id: str, base_version_id: str | None = None, db: Session = Depends(get_db)):
     job = _job_or_404(db, job_id)
     rec = latest_record(db, job_id)
     from backend.scraper.enrichment import validate_job_description
@@ -84,8 +97,8 @@ def job_workspace(job_id: str, db: Session = Depends(get_db)):
                 "description_source": job.description_source, "description_quality": job.description_quality,
                 "needs_job_details": needs_details, "location": job.location, "status": job.status,
                 "has_description": not needs_details},
-        "analysis": None, "requirements": [], "match": None, "gaps": [],
-        "stale": False,
+        "analysis": None, "requirements": [], "match": None, "resume_audit": None, "headlines": headlines,
+        "stale": False, "outdated": False,
         "running": [k for k in ("copilot_analyze", "copilot_match") if is_running(k, str(job_id))],
         "application": {"id": str(app.id), "status": app.status} if app else None,
     }
@@ -103,36 +116,47 @@ def job_workspace(job_id: str, db: Session = Depends(get_db)):
     ev = {e["requirement_id"]: e for e in (rec.evidence or [])}
     out["analysis"] = {**(rec.analysis or {}), "id": rec.id, "provider": rec.provider, "model": rec.model,
                        "created_at": rec.created_at.isoformat() if rec.created_at else None}
-    out["requirements"] = [
-        {**r, "status": ev.get(r["id"], {}).get("status", "UNKNOWN"),
-         "explanation": ev.get(r["id"], {}).get("explanation", ""),
-         "evidence": [{"ref": s, "headline": headlines.get(s) or s} for s in ev.get(r["id"], {}).get("source_fact_ids", [])]}
-        for r in reqs
-    ]
+    def row(r):
+        e = ev.get(r["id"], {})
+        return {**r, "status": e.get("status", "UNKNOWN"), "explanation": e.get("explanation", ""),
+                "rules": e.get("rules", []), "llm_status": e.get("llm_status"), "llm_explanation": e.get("llm_explanation", ""),
+                "original_source_fact_ids": e.get("original_source_fact_ids", []),
+                "dropped_source_fact_ids": e.get("dropped_source_fact_ids", e.get("dropped_ids", [])),
+                "evidence": [{"ref": s, "headline": headlines.get(s) or s} for s in e.get("source_fact_ids", [])]}
+    out["requirements"] = [row(r) for r in reqs]
     out["match"] = rec.match
     out["jd_stale"] = jd_stale
-    out["stale"] = rec.evidence is None or rec.profile_version != F.profile_version(db) or jd_stale
+    out["outdated"] = match_is_outdated(rec.match)
+    out["stale"] = rec.evidence is None or rec.profile_version != F.profile_version(db) or jd_stale or out["outdated"]
     out["needs_job_details"] = False
-    if rec.evidence is not None:
-        text, refs = current_resume_context(db, job.id)
-        out["gaps"] = M.gaps(reqs, rec.evidence, text, refs)
+    if base_version_id:
+        try:
+            _uuid.UUID(base_version_id)
+        except ValueError:
+            raise HTTPException(404, "résumé version not found")
+    if rec.evidence is not None and not out["outdated"]:
+        from backend.copilot.resume_audits import workspace
+        out["resume_audit"] = workspace(db, job.id, rec, base_version_id)
     return out
 
 
 @router.post("/jobs/{job_id}/context", status_code=201)
 async def add_context(job_id: str, body: dict, db: Session = Depends(get_db)):
-    """New factual context from the gap screen: it becomes a verified profile fact first, then the match reruns."""
+    """New context from the gap audit. It is used only once the user confirms it is true (`confirmed: true`):
+    then it is a verified fact, the profile version changes and the match and audits rerun. Unconfirmed, it waits
+    unverified in the Profile and nothing cites it. The parent is whatever the user picked; none is inferred."""
     from backend.api.routes_profile import _check_evidence, _check_parent, _fact_dict, _validated
     _job_or_404(db, job_id)
     kind = str(body.get("kind") or "")
     data = _validated(kind, body.get("data"))
     _check_evidence(db, data)
+    confirmed = body.get("confirmed") is True
     row = CandidateFact(kind=kind, parent_id=_check_parent(db, kind, body.get("parent_id")), data=data,
-                        verified=True, source="gap")
+                        verified=confirmed, source="gap")
     db.add(row)
     db.commit()
     db.refresh(row)
-    rerun = _launch("copilot_match", run_match, job_id) if latest_record(db, job_id) else None
+    rerun = _launch("copilot_match", run_match, job_id) if confirmed and latest_record(db, job_id) else None
     return {"fact": _fact_dict(row), "rematch": rerun if isinstance(rerun, dict) else None}
 
 
@@ -181,7 +205,8 @@ def dashboard(db: Session = Depends(get_db)):
     def job_row(job, **extra):
         return {"job_id": str(job.id), "title": job.title, "company": job.company, **extra}
 
-    scored = sorted((a for a in analyses if a.match and a.job_id in jobs), key=lambda a: a.match.get("score", 0), reverse=True)
+    scored = sorted((a for a in analyses if a.match and a.match.get("score") is not None and a.job_id in jobs),
+                    key=lambda a: a.match["score"], reverse=True)
     drafts = sorted((v for v in versions if v.status == "draft" and v.kind == "tailored" and v.job_id), key=lambda v: v.created_at, reverse=True)
     draft_jobs = {j.id: j for j in db.query(Job).filter(Job.id.in_([v.job_id for v in drafts])).all()} if drafts else {}
     app_jobs = {j.id: j for j in db.query(Job).filter(Job.id.in_([a.job_id for a in apps if a.status == "ready_to_apply"])).all()} if apps else {}

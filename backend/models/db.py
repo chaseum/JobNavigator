@@ -600,6 +600,26 @@ class ResumeVersion(Base):
     output_dir = Column(String, nullable=True)
 
 
+# ── Resume Applicability audits ──────────────────────────────────────────────
+# One deterministic audit of one résumé version against one job analysis at one
+# profile version (backend/copilot/applicability.py). Kept so a base -> tailored
+# before/after stays reproducible after the profile or the draft moves on.
+class ResumeAudit(Base):
+    __tablename__ = "resume_audits"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    job_analysis_id = Column(Integer, ForeignKey("job_analyses.id", ondelete="CASCADE"), nullable=False, index=True)
+    resume_version_id = Column(UUID(as_uuid=True), ForeignKey("resume_versions.id", ondelete="CASCADE"), nullable=False, index=True)
+    kind = Column(String, nullable=False)                 # base | tailored
+    profile_version = Column(String(16), nullable=True)
+    resume_hash = Column(String(16), nullable=True)       # résumé JSON + claim audit it was computed from
+    score = Column(Integer, nullable=True)                # Resume Applicability
+    maximum = Column(Integer, nullable=True)              # the most the verified profile supports
+    parser_health = Column(Integer, nullable=True)        # separate measurement, never mixed into score
+    result = Column(JSON, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+
+
 class ImmutableVersionError(ValueError):
     pass
 

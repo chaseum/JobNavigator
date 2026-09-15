@@ -30,7 +30,8 @@ def test_keyword_claim_without_a_cited_fact_earns_nothing():
 
 def test_citing_a_fact_that_does_not_exist_is_dropped_not_trusted():
     ev = M.sanitize_evidence(REQS[:1], [{"requirement_id": "r1", "status": "MATCHED", "source_fact_ids": ["project_999", "Python"]}], FACTS, {})
-    assert ev[0]["status"] == "MISSING" and ev[0]["dropped_ids"] == ["project_999", "Python"]
+    assert ev[0]["status"] == "MISSING" and ev[0]["dropped_source_fact_ids"] == ["project_999", "Python"]
+    assert ev[0]["llm_status"] == "MATCHED" and ev[0]["original_source_fact_ids"] == ["project_999", "Python"]
 
 
 def test_a_listed_skill_without_usage_evidence_is_partial_at_most():
@@ -59,39 +60,22 @@ def test_every_requirement_gets_a_row_and_unmentioned_ones_are_unknown():
     assert {e["status"] for e in ev} == {"UNKNOWN"}
 
 
-def test_score_exposes_components_and_reweights_around_empty_ones():
+def test_candidate_fit_formula_is_deterministic_and_leaves_eligibility_out():
     ev = M.sanitize_evidence(REQS, [
         {"requirement_id": "r1", "status": "MATCHED", "source_fact_ids": ["project_1"]},
         {"requirement_id": "r2", "status": "MISSING"},
         {"requirement_id": "r4", "status": "PARTIAL", "source_fact_ids": ["internship_2"]},
     ], FACTS, {"identity.authorized_us": True, "identity.requires_sponsorship_now": False, "identity.requires_sponsorship_future": False})
     result = M.score(REQS, ev)
-    comps = {c["name"]: c for c in result["components"]}
-    # required: r1 (3, matched) + r2 (2, missing) -> 3/5; technology the same; eligibility 1; experience 0.5
-    assert comps["required"]["coverage"] == 0.6 and comps["technology"]["coverage"] == 0.6
-    assert comps["eligibility"]["coverage"] == 1.0 and comps["experience"]["coverage"] == 0.5
-    assert comps["preferred"]["coverage"] is None and comps["parser_health"]["coverage"] is None
-    expected = (30 * 1.0 + 30 * 0.6 + 15 * 0.5 + 10 * 0.6) / 85 * 100
-    assert result["score"] == round(expected)
+    # r1 required×3 = 9 matched, r2 required×2 = 6 missing, r4 responsibility required×2×0.5 = 3 partial; r3 eligibility unscored
+    assert result["score"] == round((9 * 1 + 6 * 0 + 3 * 0.5) / 18 * 100)
+    assert result["coverage"] == {"required": round(10.5 / 18, 3), "preferred": None}
     assert result["counts"] == {"MATCHED": 2, "PARTIAL": 1, "UNKNOWN": 0, "MISSING": 1}
-
-    heavy_eligibility = M.score(REQS, ev, weights={"eligibility": 100, "required": 0, "technology": 0, "experience": 0})
-    assert heavy_eligibility["score"] == 100
-    assert M.score(REQS, ev, parser_health=0)["score"] < result["score"]
-
-
-def test_gaps_never_offer_a_missing_requirement_and_split_supported_ones():
-    ev = M.sanitize_evidence(REQS[:2] + REQS[3:], [
-        {"requirement_id": "r1", "status": "MATCHED", "source_fact_ids": ["project_1"]},
-        {"requirement_id": "r2", "status": "MISSING", "source_fact_ids": []},
-        {"requirement_id": "r4", "status": "MATCHED", "source_fact_ids": ["internship_2"]},
-    ], FACTS, {})
-    reqs = REQS[:2] + REQS[3:]
-    by = {g["requirement_id"]: g for g in M.gaps(reqs, ev, "Intern at CED. Wrote ETL jobs.", {"internship_2"})}
-    assert by["r2"]["kind"] == "cannot_claim" and by["r2"]["source_fact_ids"] == []
-    assert by["r1"]["kind"] == "safe_to_add"            # project_1 is not on the résumé
-    assert by["r4"]["kind"] == "safe_to_rephrase"       # on the résumé, but not in the job's words
-    assert all(g["kind"] == "safe_to_add" for g in M.gaps(reqs, ev, None, None) if g["requirement_id"] != "r2")
+    assert result["weights"] == M.DEFAULT_WEIGHTS and "never scored" in result["formula"]
+    assert "parser_health" not in result["weights"]
+    # the weights are the only knob, and they move the number predictably
+    assert M.score(REQS, ev, weights={"responsibility": 0})["score"] == round(9 / 15 * 100)
+    assert M.score(REQS[2:3], ev)["score"] is None, "eligibility alone is not a score"
 
 
 # ── structured output ────────────────────────────────────────────────────────
@@ -108,7 +92,7 @@ async def test_ollama_structured_call_sends_the_schema_and_temperature_zero(test
     from backend.copilot.schemas import EvidenceMapping
     _settings(test_db, llm_provider="ollama", llm_model="any-local-model", ollama_base_url="http://ollama.test:11434")
     mock_httpx["response"].json.return_value = {"message": {"content": json.dumps(
-        {"matches": [{"requirement_id": "r1", "status": "MATCHED", "source_fact_ids": ["project_1"]}]})}}
+        {"matches": [{"requirement_id": "r1", "explanation": "used in a project", "source_fact_ids": ["project_1"], "status": "MATCHED"}]})}}
 
     out, provider, model = await call_structured(EvidenceMapping, "p", "s", feature="copilot")
     assert provider == "ollama" and model == "any-local-model"
@@ -119,6 +103,8 @@ async def test_ollama_structured_call_sends_the_schema_and_temperature_zero(test
     assert body["format"] == EvidenceMapping.model_json_schema()
     assert body["options"]["temperature"] == 0
     assert body["think"] is False
+    assert {"source_fact_ids", "explanation"} <= set(body["format"]["$defs"]["EvidenceMatch"]["required"]), \
+        "citations must be required: with an optional list qwen3:8b cited nothing"
 
 
 async def test_structured_output_that_fails_the_schema_is_an_error_not_a_guess(test_db, mock_httpx):
@@ -172,8 +158,8 @@ Candidates maintain reliable systems, review code, and improve service quality o
             ]), "ollama", "m"
         assert unverified_ref not in prompt, "unverified facts must never reach the matcher"
         return EvidenceMapping(matches=[
-            {"requirement_id": "r1", "status": "MATCHED", "source_fact_ids": [proj_ref]},
-            {"requirement_id": "r2", "status": "MATCHED", "source_fact_ids": [unverified_ref]},
+            {"requirement_id": "r1", "explanation": "used", "status": "MATCHED", "source_fact_ids": [f"[{proj_ref}]"]},
+            {"requirement_id": "r2", "explanation": "used", "status": "MATCHED", "source_fact_ids": [unverified_ref]},
         ]), "ollama", "m"
 
     monkeypatch.setattr(A, "call_structured", fake_structured)
@@ -183,19 +169,26 @@ Candidates maintain reliable systems, review code, and improve service quality o
     ws = api_client.get(f"/api/copilot/jobs/{job_id}").json()
     by_text = {r["text"]: r for r in ws["requirements"]}
     assert by_text["Python"]["status"] == "MATCHED" and by_text["Python"]["evidence"][0]["headline"].startswith("Project: EEG")
+    assert by_text["Python"]["original_source_fact_ids"] == [f"[{proj_ref}]"], "the bracketed citation was normalized, not discarded"
     assert by_text["Kubernetes"]["status"] == "MISSING" and by_text["Kubernetes"]["evidence"] == []
+    assert by_text["Kubernetes"]["dropped_source_fact_ids"] == [unverified_ref]
     assert by_text["Authorized to work in the US"]["status"] == "MATCHED"
     assert by_text["Authorized to work in the US"]["evidence"][0]["headline"] == "Your answer: authorized to work in the US — yes"
-    assert any(g["requirement"] == "Kubernetes" and g["kind"] == "cannot_claim" for g in ws["gaps"])
     assert ws["stale"] is False and ws["match"]["score"] > 0
 
     test_db.expire_all()
-    assert test_db.get(Job, job.id).cv_scores["Role Match"] == ws["match"]["score"]
+    assert "Role Match" not in (test_db.get(Job, job.id).cv_scores or {}), "Candidate Fit never lands among legacy CV scores"
 
-    # new context from the gap screen becomes a verified fact first, then the match reruns against it
+    # context is only evidence once the user confirms it: unconfirmed it waits unverified and nothing reruns
     r = api_client.post(f"/api/copilot/jobs/{job_id}/context", json={"kind": "project", "data": {"name": "Helm charts at work"}})
+    assert r.status_code == 201 and r.json()["fact"]["verified"] is False and r.json()["rematch"] is None
+    assert api_client.get(f"/api/copilot/jobs/{job_id}").json()["stale"] is False
+    version = api_client.get("/api/profile").json()["profile_version"]
+    r = api_client.post(f"/api/copilot/jobs/{job_id}/context",
+                        json={"kind": "project", "data": {"name": "Kubernetes operator at work"}, "confirmed": True})
     assert r.status_code == 201 and r.json()["fact"]["verified"] is True and r.json()["fact"]["source"] == "gap"
     assert r.json()["rematch"]["run_id"]
+    assert api_client.get("/api/profile").json()["profile_version"] != version, "confirmed context changes the profile version"
     await A.run_match(job_id)
     assert api_client.get(f"/api/copilot/jobs/{job_id}").json()["stale"] is False
 

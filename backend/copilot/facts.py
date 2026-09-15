@@ -163,6 +163,28 @@ def parse_ref(ref: str) -> Optional[tuple[str, int]]:
     return (m.group(1), int(m.group(2))) if m and m.group(1) in KINDS else None
 
 
+_IDENTITY_REF_RE = re.compile(r"^identity\.[a-z_]+$")
+
+
+def strip_ref(raw) -> str:
+    """A model citation with surrounding whitespace and exactly one pair of square brackets removed.
+
+    The prompt shows facts as "[education_10] ..."; the brackets are delimiters,
+    never part of the id. Nothing else is repaired.
+    """
+    s = raw.strip() if isinstance(raw, str) else ""
+    return s[1:-1].strip() if len(s) > 1 and s[0] == "[" and s[-1] == "]" else s
+
+
+def normalize_ref(raw) -> Optional[str]:
+    """The canonical provenance id ("education_10", "identity.authorized_us") a citation names, or None when it names none.
+
+    Shape only: whether the id is a verified fact is the caller's check.
+    """
+    s = strip_ref(raw)
+    return s if parse_ref(s) or _IDENTITY_REF_RE.match(s) else None
+
+
 def schema_for_ui() -> dict:
     """Field list per kind so the Profile screen renders forms without duplicating this file."""
     out = {}

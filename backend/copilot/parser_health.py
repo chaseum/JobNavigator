@@ -27,6 +27,11 @@ def _found(needle: str, hay: str) -> bool:
     return bool(needle) and normalize(needle) in hay
 
 
+def squash(text: str) -> str:
+    """Letters and digits only: position checks survive a hyphen broken across lines or spaces the extractor dropped."""
+    return re.sub(r"[\s\-‐‑–—]+", "", text)
+
+
 def check(raw_text: str, resume: dict) -> dict:
     """{"score": 0-100, "checks": [{name, ok, detail}]} for text extracted from the PDF of `resume`."""
     hay = normalize(raw_text)
@@ -37,8 +42,14 @@ def check(raw_text: str, resume: dict) -> dict:
     def add(name, ok, detail=""):
         checks.append({"name": name, "ok": bool(ok), "detail": detail})
 
+    add("Text extracted", len(hay) >= 40, "" if len(hay) >= 40 else "little or no text comes out of the PDF (blank or image-only)")
+
     name = (resume.get("header") or {}).get("name") or ""
     add("Name extracted", _found(name, hay), "" if _found(name, hay) else f"'{name}' not found in the text")
+
+    contact = [c.get("text") for c in (resume.get("header") or {}).get("contact") or [] if c.get("text")]
+    lost = [c for c in contact if not _found(c, hay)]
+    add("Contact details extracted", not lost, f"missing: {', '.join(lost)}" if lost else ("none on this résumé" if not contact else ""))
 
     missing = [s["title"] for s in sections if not _found(s["title"], hay)]
     add("Section headings extracted", not missing, f"missing: {', '.join(missing)}" if missing else "")
@@ -53,16 +64,28 @@ def check(raw_text: str, resume: dict) -> dict:
         lost = [w for w in wanted if not _found(w, hay)]
         add(label, not lost, f"missing: {', '.join(lost)}" if lost else ("none on this résumé" if not wanted else ""))
 
+    dates = [e.get("date") for _, e in entries if e.get("date")]
+    lost = [d for d in dates if not _found(d, hay)]
+    add("Dates extracted", not lost, f"missing: {', '.join(lost)}" if lost else "")
+
     skills = [i for s in sections for line in s.get("lines") or [] for i in line.get("items") or []]
     lost = [k for k in skills if not _found(k, hay)]
     add("Skills extracted", len(lost) <= len(skills) * 0.1, f"missing: {', '.join(lost[:8])}" if lost else "")
 
-    disorder = []
+    flat, dehyphen = squash(hay), re.sub(r"-\s*", "", hay)
+    disorder, run_together = [], []
     for _, e in entries:
-        starts = [hay.find(normalize(" ".join(b["text"].split()[:5]))) for b in e.get("bullets") or []]
+        starts = []
+        for b in e.get("bullets") or []:
+            head = normalize(" ".join(b["text"].split()[:5]))
+            starts.append(flat.find(squash(head)))
+            if starts[-1] != -1 and re.sub(r"-\s*", "", head) not in dehyphen:
+                run_together.append(" ".join(b["text"].split()[:5]))
         if -1 in starts or starts != sorted(starts):
             disorder.append(e.get("heading") or "?")
     add("Bullet order preserved", not disorder, f"out of order or unreadable under: {', '.join(disorder)}" if disorder else "")
+    # a justified line can come out with its spaces gone ("automatedplaylistrouting"); a parser then sees one long word
+    add("Words separated", not run_together, f"words run together in: {'; '.join(run_together[:4])}" if run_together else "")
 
     garbled = "�" in raw_text or "(cid:" in raw_text
     add("No garbled characters", not garbled, "replacement glyphs or unmapped font codes in the text" if garbled else "")

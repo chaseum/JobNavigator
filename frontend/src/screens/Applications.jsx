@@ -43,7 +43,7 @@ const srcLabel = (v) => ({
 // so a stage is the same colour here, in the Stats funnel, and on the Sankey nodes.
 const STAGES = [
   { id: 'saved', label: 'Saved', dot: 'var(--muted)', hint: 'Shortlisted, not started' },
-  { id: 'analyzed', label: 'Analyzed', dot: 'var(--muted)', hint: 'Role Match computed' },
+  { id: 'analyzed', label: 'Analyzed', dot: 'var(--muted)', hint: 'Candidate Fit computed' },
   { id: 'resume_drafted', label: 'Résumé drafted', dot: 'var(--muted)', hint: 'A tailored résumé is in review' },
   { id: 'ready_to_apply', label: 'Ready to apply', dot: 'var(--stage-applied)', hint: 'Form filled by the extension — you submit' },
   { id: 'applied', label: 'Applied', dot: 'var(--stage-applied)', hint: 'Waiting on a first response' },

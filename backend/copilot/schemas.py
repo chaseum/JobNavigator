@@ -6,7 +6,14 @@ are worth; the model's own confidence is never a score.
 """
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from backend.copilot.facts import strip_ref
+
+
+def _strip_refs(v):
+    # prompts show ids as "[experience_7]"; the brackets are delimiters, not the id. Validity is checked downstream.
+    return [strip_ref(x) if isinstance(x, str) else x for x in v] if isinstance(v, list) else v
 
 RequirementCategory = Literal[
     "qualification", "technology", "domain", "responsibility", "education",
@@ -47,10 +54,13 @@ class JobAnalysis(BaseModel):
 
 
 class EvidenceMatch(BaseModel):
+    # Field order is generation order under constrained decoding: reason, then cite, then decide.
+    # source_fact_ids is required: with an optional list qwen3:8b returned [] for every row.
+    # Citations stay raw here; matching.sanitize_evidence normalizes them and records what it dropped.
     requirement_id: str
+    explanation: str
+    source_fact_ids: list[str]
     status: EvidenceStatus
-    source_fact_ids: list[str] = []
-    explanation: str = ""
 
 
 class EvidenceMapping(BaseModel):
@@ -69,11 +79,16 @@ class PlannedEntry(BaseModel):
     fact_id: str                          # experience_7 / internship_3 / project_4 / research_2
     bullet_sources: list[list[str]] = []  # one inner list per bullet: the fact ids it may draw on
 
+    _fact = field_validator("fact_id", mode="before")(lambda v: strip_ref(v) if isinstance(v, str) else v)
+    _groups = field_validator("bullet_sources", mode="before")(lambda v: [_strip_refs(g) for g in v] if isinstance(v, list) else v)
+
 
 class ResumePlan(BaseModel):
     entries: list[PlannedEntry]
     skill_ids: list[str] = []
     rationale: str = ""
+
+    _skills = field_validator("skill_ids", mode="before")(_strip_refs)
 
 
 class ResumeBulletRewrite(BaseModel):
@@ -81,6 +96,8 @@ class ResumeBulletRewrite(BaseModel):
     source_fact_ids: list[str]
     requirement_ids: list[str] = []
     reason: str = ""
+
+    _refs = field_validator("source_fact_ids", mode="before")(_strip_refs)
 
 
 class BulletRewrites(BaseModel):
@@ -111,3 +128,5 @@ class ApplicationQuestionAnswer(BaseModel):
     answer: str = ""
     source_fact_ids: list[str] = []
     needs_user_input: bool = False
+
+    _refs = field_validator("source_fact_ids", mode="before")(_strip_refs)

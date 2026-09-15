@@ -52,11 +52,12 @@ def resume_refs(resume: dict) -> set:
 
 
 def resume_plain_text(resume: dict) -> str:
-    parts = [(resume.get("header") or {}).get("name", "")]
+    header = resume.get("header") or {}
+    parts = [header.get("name", "")] + [c.get("text", "") for c in header.get("contact") or []]
     for s in resume.get("sections") or []:
         parts.append(s["title"])
         for e in s.get("entries") or []:
-            parts += [e.get("heading", ""), e.get("subheading", "")] + [b["text"] for b in e.get("bullets") or []]
+            parts += [e.get("heading", ""), e.get("subheading", ""), e.get("date", "")] + [b["text"] for b in e.get("bullets") or []]
         for line in s.get("lines") or []:
             parts.append(f"{line['label']}: {', '.join(line['items'])}")
     return "\n".join(p for p in parts if p)
@@ -69,12 +70,6 @@ def latest_accepted(db, job_id=None, kind=None):
     if kind:
         q = q.filter(ResumeVersion.kind == kind)
     return q.order_by(ResumeVersion.accepted_at.desc()).first()
-
-
-def resume_context_for_job(db, job_id):
-    """(text, refs) of the résumé gaps are measured against: this job's accepted version, else the accepted base."""
-    v = latest_accepted(db, job_id=job_id) or latest_accepted(db, kind="base")
-    return (resume_plain_text(v.resume_json), resume_refs(v.resume_json)) if v else (None, None)
 
 
 def _index(db):
@@ -104,7 +99,10 @@ async def generate_base() -> str:
 
 
 async def generate_tailored(job_id: str) -> str:
-    from backend.copilot.analysis import latest_record
+    """Audit the base résumé, tailor toward its SAFE_TO_ADD / SAFE_TO_REPHRASE gaps with verified facts only, re-audit the draft."""
+    from backend.copilot import applicability as AP
+    from backend.copilot import resume_audits as RA
+    from backend.copilot.analysis import evidence_context, latest_record, weights
     db = SessionLocal()
     try:
         job = db.query(Job).filter(Job.id == job_id).first()
@@ -115,13 +113,22 @@ async def generate_tailored(job_id: str) -> str:
         st = resume_settings(db)
         snapshot = {"analysis_id": rec.id, "analysis": rec.analysis, "evidence": rec.evidence, "match": rec.match,
                     "profile_version": rec.profile_version}
-        base = latest_accepted(db, kind="base")
+        base = RA.base_version(db)
         base_id, label = (base.id if base else None), f"{job.company} — {job.title}"
         version = F.profile_version(db)
+        _, facts_by_ref, _ = evidence_context(db)
+        if base is not None:
+            base_audit = RA.compute(db, rec, base, facts_by_ref)
+        else:   # no base version yet: measure against what a base résumé from the profile would show
+            base_audit = AP.audit(rec.analysis.get("requirements") or [], rec.evidence, P.build_base(ix, persona, st["section_order"]),
+                                  facts_by_ref, None, weights(db), rec.analysis.get("technologies") or [])
     finally:
         db.close()
 
-    resume, audit, provider, model = await P.tailor(ix, persona, snapshot["analysis"], snapshot["evidence"], st, job_id)
+    gaps = [r for r in base_audit["rows"] if r.get("gap") in ("SAFE_TO_ADD", "SAFE_TO_REPHRASE")]
+    resume, audit, provider, model = await P.tailor(ix, persona, snapshot["analysis"], snapshot["evidence"], st, job_id, gaps=gaps)
+    snapshot["applicability"] = {"base_version_id": str(base_id) if base_id else None, "base_score": base_audit["score"],
+                                 "maximum": base_audit["maximum"], "gaps_targeted": [g["requirement_id"] for g in gaps]}
 
     db = SessionLocal()
     try:
@@ -135,8 +142,11 @@ async def generate_tailored(job_id: str) -> str:
     finally:
         db.close()
     await rebuild(vid)
+    stored = RA.audit_job(job_id, [x for x in (base_id, vid) if x])
+    after = stored.get(vid) or {}
     c = audit["counts"]
-    return f"Drafted résumé for {label}: {c['UNSUPPORTED']} unsupported, {c['AMBIGUOUS']} to review"
+    return (f"Drafted résumé for {label}: Resume Applicability {base_audit['score']} → {after.get('score')} "
+            f"(max {base_audit['maximum']}); {c['UNSUPPORTED']} unsupported, {c['AMBIGUOUS']} to review")
 
 
 async def rebuild(version_id: str) -> None:
@@ -354,10 +364,3 @@ def export_zip(v: ResumeVersion) -> bytes:
         for name, content in export_files(v).items():
             z.writestr(name, content)
     return buf.getvalue()
-
-
-def latest_parser_health(db, job_id):
-    v = (db.query(ResumeVersion).filter(ResumeVersion.job_id == job_id, ResumeVersion.parser_health.isnot(None),
-                                        ResumeVersion.status != "rejected")
-         .order_by(ResumeVersion.created_at.desc()).first())
-    return (v.parser_health or {}).get("score") if v else None

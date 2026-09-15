@@ -310,11 +310,15 @@ def _role_match_summary(rec, version, job=None) -> dict:
 
     jd_stale = bool(job and rec.jd_hash != hashlib.sha256((job.description or "").encode()).hexdigest())
     needs_details = bool(job and not _job_description_is_valid(job))
+    outdated = bool(m) and "formula" not in m   # scored by the retired Role Match formula; re-match
     return {
+        # Candidate Fit only. Never a legacy CV score, never max() across differently defined numbers.
         "score": None if needs_details else m.get("score"),
+        "unavailable": m.get("unavailable"),
+        "outdated": outdated,
         "counts": m.get("counts"),
         "hard_blockers": len(m.get("hard_blockers") or []),
-        "stale": rec.evidence is None or rec.profile_version != version or jd_stale,
+        "stale": rec.evidence is None or rec.profile_version != version or jd_stale or outdated,
         "needs_job_details": needs_details,
         "jd_stale": jd_stale,
         "matched": texts("MATCHED"),
@@ -1122,7 +1126,9 @@ def get_job(job_id: str, db: Session = Depends(get_db)):
 
 
 @router.patch("/{job_id}")
-async def update_job(job_id: str, updates: dict, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+async def update_job(job_id: str, updates: dict, background_tasks: BackgroundTasks, legacy_score: bool = True,
+                     db: Session = Depends(get_db)):
+    # legacy_score=false: the Copilot screens save jobs without starting the classic LLM CV scorer.
     # Must be async — launch_background() uses asyncio.create_task(), which needs a running
     # event loop; a sync endpoint's threadpool has none, so the task would silently never start.
     job = db.query(Job).filter(Job.id == job_id).first()
@@ -1138,7 +1144,7 @@ async def update_job(job_id: str, updates: dict, background_tasks: BackgroundTas
 
     # Trigger CV scoring when job is saved (respects on_save_action); launched as a tracked
     # op so it shows in /monitor/in-flight + /monitor/finished, driving the dashboard's scoring toasts.
-    if updates.get("saved") is True and not job.cv_scores:
+    if legacy_score and updates.get("saved") is True and not job.cv_scores:
         from backend.models.db import Setting
         on_save_row = db.query(Setting).filter(Setting.key == "on_save_action").first()
         on_save = on_save_row.value if on_save_row and on_save_row.value else "off"

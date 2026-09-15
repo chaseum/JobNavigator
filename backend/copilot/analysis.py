@@ -32,8 +32,8 @@ List the main responsibilities too, with category "responsibility".
 JOB POSTING:
 <<JD>>"""
 
-MATCH_SYSTEM = ("You check job requirements against a candidate's verified facts. Cite fact ids exactly as written "
-                "in square brackets. Never assume experience the facts do not state.")
+MATCH_SYSTEM = ("You check job requirements against a candidate's verified facts. Each fact starts with its id in square "
+                "brackets; the brackets are only delimiters. Never assume experience the facts do not state.")
 MATCH_PROMPT = """For every requirement below, return one match.
 
 status:
@@ -43,6 +43,11 @@ status:
 - UNKNOWN: the facts are too thin to decide. Cite nothing.
 A skill that is only listed is weaker than a role, project or research entry where it was used.
 Do not treat similar-sounding tools as the same tool.
+
+Citing facts:
+- source_fact_ids lists the ids of the facts that support your status.
+- Write each id WITHOUT brackets. Correct: "education_10". Incorrect: "[education_10]".
+- MATCHED and PARTIAL require at least one id. MISSING and UNKNOWN cite nothing.
 
 CANDIDATE FACTS:
 <<FACTS>>
@@ -106,10 +111,12 @@ def latest_record(db, job_id):
 
 
 def evidence_context(db) -> tuple[list, dict, dict]:
-    """(verified facts, {ref: {kind, data}}, identity answers)."""
+    """(verified facts, {ref: {kind, data, parent ref}}, identity answers)."""
     facts = F.load_verified(db)
+    refs = {f.id: F.fact_ref(f) for f in facts}
     persona = db.query(Persona).filter(Persona.id == 1).first()
-    return facts, {F.fact_ref(f): {"kind": f.kind, "data": f.data or {}} for f in facts}, F.identity_facts(persona)
+    return (facts, {F.fact_ref(f): {"kind": f.kind, "data": f.data or {}, "parent": refs.get(f.parent_id)} for f in facts},
+            F.identity_facts(persona))
 
 
 async def run_analysis(job_id: str) -> str:
@@ -160,44 +167,47 @@ async def run_match(job_id: str) -> str:
         rec = latest_record(db, job_id)
         if rec is None:
             raise RuntimeError("analyze the job first")
-        rec_id, requirements = rec.id, list((rec.analysis or {}).get("requirements") or [])
+        rec_id, analysis = rec.id, rec.analysis or {}
+        requirements = list(analysis.get("requirements") or [])
         facts, facts_by_ref, identity = evidence_context(db)
         facts_text = F.facts_prompt(facts)
         w = weights(db)
         version = F.profile_version(db)
-        from backend.copilot.versions import latest_parser_health
-        health = latest_parser_health(db, job_id)
     finally:
         db.close()
 
-    matches = []
+    matches, llm_error = [], None
     askable = [r for r in requirements if r.get("category") != "work_authorization"]
     if facts and askable:
-        for i in range(0, len(askable), _MATCH_CHUNK):
-            chunk = askable[i:i + _MATCH_CHUNK]
-            reqs_text = "\n".join(f"{r['id']}: [{r['category']}{', required' if r.get('required') else ', preferred'}] {r['text']}" for r in chunk)
-            out, _, _ = await call_structured(
-                EvidenceMapping, MATCH_PROMPT.replace("<<FACTS>>", facts_text).replace("<<REQS>>", reqs_text),
-                MATCH_SYSTEM, feature="copilot", max_tokens=4000, job_id=job_id)
-            matches.extend(m.model_dump() for m in out.matches)
+        try:
+            for i in range(0, len(askable), _MATCH_CHUNK):
+                chunk = askable[i:i + _MATCH_CHUNK]
+                reqs_text = "\n".join(f"{r['id']}: [{r['category']}{', required' if r.get('required') else ', preferred'}] {r['text']}" for r in chunk)
+                out, _, _ = await call_structured(
+                    EvidenceMapping, MATCH_PROMPT.replace("<<FACTS>>", facts_text).replace("<<REQS>>", reqs_text),
+                    MATCH_SYSTEM, feature="copilot", max_tokens=4000, job_id=job_id)
+                matches.extend(m.model_dump() for m in out.matches)
+        except Exception as e:   # deterministic evidence still stands; the number does not
+            logger.warning(f"evidence matching failed for {job_id}: {e}")
+            llm_error = str(e)[:300]
 
-    evidence = M.sanitize_evidence(requirements, matches, facts_by_ref, identity)
-    result = M.score(requirements, evidence, w, parser_health=health)
+    evidence = M.sanitize_evidence(requirements, matches, facts_by_ref, identity, analysis.get("technologies") or [])
+    result = M.score(requirements, evidence, w)
+    if not facts:
+        result["unavailable"] = "your Profile has no verified facts"
+    elif llm_error:
+        result["unavailable"] = f"evidence matching failed: {llm_error}"
+    if result.get("unavailable"):
+        # a score computed without the evidence step would read as a real low fit
+        result["partial_score"], result["score"] = result["score"], None
 
     db = SessionLocal()
     try:
         rec = db.get(JobAnalysisRecord, rec_id)
         rec.evidence, rec.match, rec.profile_version, rec.matched_at = evidence, result, version, utcnow()
-        job = db.query(Job).filter(Job.id == job_id).first()
-        if job is not None:
-            # surfaces in the feed's score chip and sort, next to any legacy score
-            scores = {**(job.cv_scores or {}), "Role Match": result["score"]}
-            scores.pop("_skipped", None)
-            job.cv_scores = scores
-            numeric = {k: v for k, v in scores.items() if isinstance(v, (int, float))}
-            job.best_cv_score = max(numeric.values()) if numeric else None
-            job.best_cv = max(numeric, key=numeric.get) if numeric else None
         db.commit()
     finally:
         db.close()
-    return f"Role Match {result['score']}"
+    from backend.copilot.resume_audits import audit_job
+    audit_job(job_id)
+    return f"Candidate Fit {result['score'] if result['score'] is not None else 'unavailable'}"

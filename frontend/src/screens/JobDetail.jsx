@@ -12,25 +12,26 @@ import { Button, Card, Helper, IconButton, Input, Label, Notice, Pill, ScoreRing
 import { headline } from './Profile'
 import { ARRANGEMENTS, Logo, MATCH_LABEL, cap, fmtSalary } from './Jobs'
 
-// Job Detail: one workspace per posting. The header carries the Role Match
-// (evidence coverage by the verified profile, not an employer ATS score) and the
-// actions; the tabs split the work — Overview (what matters), Resume (draft,
-// review, accept), Application (what autofill will send) and Evidence (the full
-// deterministic breakdown, requirement matrix, provenance and gaps).
+// Job Detail: one workspace per posting. Three separate measurements, never mixed:
+// Candidate Fit (what the whole verified profile satisfies — the header), Resume
+// Applicability (what one specific résumé shows of that, with the truthful maximum)
+// and Parser Health (does the PDF extract cleanly). Tabs: Overview (fit, blockers,
+// strongest matches, gaps), Resume (audit → tailor → re-audit, review), Application
+// (what autofill sends) and Evidence (formula, requirement matrix, provenance).
 
 const TABS = [['overview', 'Overview'], ['resume', 'Resume'], ['application', 'Application'], ['evidence', 'Evidence']]
 const STATUS_TONE = { MATCHED: 'good', PARTIAL: 'warn', MISSING: 'bad', UNKNOWN: 'neutral' }
 const CLAIM_TONE = { SUPPORTED: 'good', AMBIGUOUS: 'warn', UNSUPPORTED: 'bad' }
-const COMPONENT_LABEL = {
-  eligibility: 'Eligibility / hard requirements', required: 'Required qualifications', preferred: 'Preferred qualifications',
-  experience: 'Experience / responsibilities', technology: 'Technology / terminology', parser_health: 'Parser Health',
-}
+const RESUME_TONE = { PRESENT: 'good', WEAK: 'warn', OMITTED_SUPPORTED: 'accent', UNSUPPORTED: 'bad', UNKNOWN: 'neutral' }
+const RESUME_LABEL = { PRESENT: 'Present', WEAK: 'Weak', OMITTED_SUPPORTED: 'Omitted, supported', UNSUPPORTED: 'Unsupported', UNKNOWN: 'Unknown' }
 const GAP_GROUPS = [
-  ['safe_to_add', 'Safe to add', 'In your profile, not on your current résumé.'],
-  ['safe_to_rephrase', 'Safe to rephrase', 'On your résumé in different words; the job’s terms may apply where accurate.'],
-  ['needs_clarification', 'Needs clarification', 'Possibly supported, but your profile does not say enough.'],
-  ['cannot_claim', 'Cannot claim', 'Nothing in your profile supports these. They will not be added.'],
+  ['SAFE_TO_ADD', '✓', 'Safe to add', 'Verified in your Profile but not shown on this résumé.'],
+  ['SAFE_TO_REPHRASE', '~', 'Truthful rephrase', 'Shown, but not in the posting’s terms; its wording may be used where accurate.'],
+  ['NEEDS_CONTEXT', '?', 'Needs context', 'Possibly true, but your verified Profile does not establish it.'],
+  ['CANNOT_CLAIM', '✗', 'Cannot claim', 'Your verified Profile does not support these. Tailoring will not add them.'],
+  ['ALREADY_VISIBLE', '●', 'Already visible', 'Supported and shown in the posting’s terms.'],
 ]
+const ACTIONABLE = ['SAFE_TO_ADD', 'SAFE_TO_REPHRASE']
 const errMsg = (e, fb) => (typeof e?.response?.data?.detail === 'string' ? e.response.data.detail : fb)
 const pct = (x) => (x == null ? '—' : `${Math.round(x * 100)}%`)
 const byWeight = (a, b) => (b.required - a.required) || ((b.importance || 2) - (a.importance || 2))
@@ -52,53 +53,63 @@ function Section({ title, help, right, children, id }) {
 
 // ── Evidence tab ─────────────────────────────────────────────────────────────
 
-function MatchBreakdown({ match, stale, minRecommended }) {
+function EvidenceList({ refs, headlines, empty = 'none' }) {
+  if (!refs?.length) return <Helper size="xs">{empty}</Helper>
+  return refs.map((ref) => (
+    <span key={ref} style={{ fontSize: 'var(--t-12)' }}>• {headlines[ref] || ref} <Helper size="xs" style={{ display: 'inline' }}>({ref})</Helper></span>
+  ))
+}
+
+function ScoringMethod({ match, audit }) {
   if (!match) return null
   return (
-    <Section title="Score breakdown" help="Deterministic: each component is the share of its requirements your verified facts evidence, weighted as shown."
-      right={stale ? <Tag tone="warn" title="Your profile changed since this was computed">stale</Tag> : null}>
-      <div style={{ display: 'flex', gap: 18, alignItems: 'center', flexWrap: 'wrap' }}>
-        <ScoreRing value={match.score} size={64} />
-        <div style={{ flex: '1 1 360px', display: 'flex', flexDirection: 'column', gap: 6 }}>
-          {match.components.filter((c) => c.coverage != null).map((c) => (
-            <div key={c.name} style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 'var(--t-13)' }}>
-              <span style={{ flex: '0 0 220px' }}>{COMPONENT_LABEL[c.name] || c.name}</span>
-              <div style={{ flex: 1, height: 6, background: 'var(--surface-2)', borderRadius: 'var(--radius-mark)', overflow: 'hidden' }}>
-                <div style={{ width: pct(c.coverage), height: '100%', background: 'var(--accent)' }} />
-              </div>
-              <span style={{ flex: '0 0 44px', textAlign: 'right' }}>{pct(c.coverage)}</span>
-              <Helper size="xs" style={{ flex: '0 0 76px' }} title="share of the overall score">weight {c.effective_weight}%</Helper>
-            </div>
-          ))}
-        </div>
-      </div>
-      <Helper>
-        {Object.entries(match.counts).map(([k, n]) => `${n} ${k.toLowerCase()}`).join(' · ')}
-        {minRecommended != null && ` · ${match.score >= minRecommended ? 'at or above' : 'below'} your recommended minimum (${minRecommended})`}
-      </Helper>
+    <Section title="How the numbers are computed" help="Deterministic from the requirement matrix below; no model ever produces a score.">
+      {match.formula
+        ? <Helper>{match.formula}</Helper>
+        : <Notice tone="warn"><Helper>This match was computed by the retired Role Match scorer. Re-match to compute Candidate Fit.</Helper></Notice>}
+      {match.weights && <Helper>Weights: {Object.entries(match.weights).map(([k, v]) => `${k.replace(/_/g, ' ')} ${v}`).join(' · ')} (Settings › Scoring weights)</Helper>}
+      <Helper>Credit — Candidate Fit: MATCHED 1, PARTIAL 0.5, UNKNOWN or MISSING 0. Resume Applicability: PRESENT 1, WEAK 0.5, omitted, unsupported or unknown 0, and never more than the profile supports.</Helper>
+      {match.coverage && <Helper>Profile coverage: required {pct(match.coverage.required)} · preferred {pct(match.coverage.preferred)}</Helper>}
+      {match.unavailable && <Notice tone="bad"><Helper>Match unavailable: {match.unavailable}</Helper></Notice>}
+      {audit && <Helper>{audit.disclaimer}</Helper>}
     </Section>
   )
 }
 
-function RequirementMatrix({ requirements }) {
+function RequirementMatrix({ requirements, audit, headlines }) {
   if (!requirements.length) return null
+  const resume = Object.fromEntries((audit?.rows || []).map((r) => [r.requirement_id, r]))
   return (
-    <Section title="Requirement matrix" help="Every requirement, with the profile facts that support it.">
+    <Section title="Requirement matrix" help={`Candidate evidence comes from your whole verified Profile; résumé evidence from ${audit ? 'the base résumé' : 'a base résumé, once one exists'}.`}>
       <div className="v2-scroll" style={{ overflowX: 'auto' }}>
-        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(180px, 2fr) 110px 80px 96px minmax(200px, 3fr)', gap: '8px 12px', fontSize: 'var(--t-13)', alignItems: 'start', minWidth: 700 }}>
-          <Label>Requirement</Label><Label>Category</Label><Label>Type</Label><Label>Status</Label><Label>Evidence</Label>
-          {requirements.map((r) => (
-            <React.Fragment key={r.id}>
-              <span>{r.text}</span>
-              <Helper>{r.category.replace(/_/g, ' ')}</Helper>
-              <Helper>{r.required ? 'required' : 'preferred'}</Helper>
-              <span><Tag tone={STATUS_TONE[r.status]}>{r.status}</Tag></span>
-              <span style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                {r.evidence.length ? r.evidence.map((e) => <span key={e.ref}>• {e.headline} <Helper size="xs">({e.ref})</Helper></span>) : <Helper>none</Helper>}
-                {r.explanation && <Helper size="xs">{r.explanation}</Helper>}
-              </span>
-            </React.Fragment>
-          ))}
+        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(180px, 2fr) minmax(220px, 3fr) minmax(200px, 2fr)', gap: '10px 14px', fontSize: 'var(--t-13)', alignItems: 'start', minWidth: 720 }}>
+          <Label>Requirement</Label><Label>Candidate (verified Profile)</Label><Label>Base résumé</Label>
+          {requirements.map((r) => {
+            const rr = resume[r.id]
+            return (
+              <React.Fragment key={r.id}>
+                <span style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                  <span>{r.text}</span>
+                  <Helper size="xs">{r.category.replace(/_/g, ' ')} · {r.required ? 'required' : 'preferred'} · importance {r.importance || 2}{rr?.weight ? ` · weight ${rr.weight}` : ''}</Helper>
+                </span>
+                <span style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                  <span><Tag tone={STATUS_TONE[r.status]}>{r.status}</Tag></span>
+                  {r.evidence.length ? r.evidence.map((e) => <span key={e.ref} style={{ fontSize: 'var(--t-12)' }}>• {e.headline} <Helper size="xs" style={{ display: 'inline' }}>({e.ref})</Helper></span>) : <Helper size="xs">no evidence</Helper>}
+                  {r.explanation && <Helper size="xs">{r.explanation}</Helper>}
+                  <Helper size="xs">
+                    {r.rules?.length ? `decided by rule: ${r.rules.join(', ')}` : 'model citation, checked'}
+                    {r.llm_status && r.llm_status !== r.status ? ` · model said ${r.llm_status}` : ''}
+                  </Helper>
+                  {r.dropped_source_fact_ids?.length > 0 && <Helper size="xs" style={{ color: 'var(--bad)' }}>dropped citations: {r.dropped_source_fact_ids.join(', ')}</Helper>}
+                </span>
+                <span style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                  {rr?.resume_status
+                    ? <><span><Tag tone={RESUME_TONE[rr.resume_status]}>{RESUME_LABEL[rr.resume_status]}</Tag></span><EvidenceList refs={rr.resume_evidence} headlines={headlines} empty="not shown" /></>
+                    : <Helper size="xs">{rr ? 'eligibility — never scored' : '—'}</Helper>}
+                </span>
+              </React.Fragment>
+            )
+          })}
         </div>
       </div>
     </Section>
@@ -132,24 +143,26 @@ function Provenance({ ws, privacy }) {
 function AddContext({ gap, jobId, entries, onSaved, pushToast }) {
   const [open, setOpen] = useState(false)
   const [kind, setKind] = useState('achievement')
-  const [parent, setParent] = useState(entries[0]?.id ?? null)
+  const [parent, setParent] = useState(null)   // the user picks where it happened; nothing is inferred
   const [text, setText] = useState('')
+  const [confirmed, setConfirmed] = useState(false)
   const [busy, setBusy] = useState(false)
-  if (!open) return <Pill size="sm" onClick={() => setOpen(true)}>+ Add context</Pill>
+  if (!open) return <Pill size="sm" onClick={() => setOpen(true)} style={{ alignSelf: 'flex-start' }}>+ Add context</Pill>
   const save = async () => {
     setBusy(true)
     try {
       const body = kind === 'achievement'
-        ? { kind, parent_id: parent, data: { text } }
-        : { kind: 'skill', data: { name: text, evidence_ids: parent != null ? [entries.find((e) => e.id === parent)?.ref].filter(Boolean) : [] } }
+        ? { kind, parent_id: parent, data: { text }, confirmed }
+        : { kind: 'skill', data: { name: text, evidence_ids: parent != null ? [entries.find((e) => e.id === parent)?.ref].filter(Boolean) : [] }, confirmed }
       await api.post(`/copilot/jobs/${jobId}/context`, body)
-      pushToast({ kind: 'success', msg: 'Saved to your profile — re-matching' })
-      setOpen(false); setText(''); onSaved()
+      pushToast({ kind: 'success', msg: 'Verified and saved to your Profile — re-matching and re-auditing' })
+      setOpen(false); setText(''); setConfirmed(false); onSaved()
     } catch (e) { pushToast({ kind: 'error', msg: errMsg(e, 'Could not save') }) } finally { setBusy(false) }
   }
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 6, padding: 10, background: 'var(--surface-2)', borderRadius: 'var(--radius-row)' }}>
-      <Helper>Only add what is true. It becomes a verified profile fact before anything uses it.</Helper>
+      {gap.question && <span style={{ fontSize: 'var(--t-13)' }}>{gap.question}</span>}
+      <Helper>If it isn’t true, leave it out. Nothing you type is used until you confirm it below.</Helper>
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
         <Select value={kind} options={[['achievement', 'Accomplishment'], ['skill', 'Skill used']]} onPick={setKind} width="150px" />
         <Select value={parent == null ? '' : String(parent)} options={entries.map((e) => [String(e.id), e.label])} onPick={(v) => setParent(Number(v))} width="280px" placeholder="Where it happened" />
@@ -157,8 +170,12 @@ function AddContext({ gap, jobId, entries, onSaved, pushToast }) {
       {kind === 'achievement'
         ? <Textarea rows={2} value={text} onChange={setText} placeholder={`What you actually did that relates to “${gap.requirement}”`} />
         : <Input value={text} onChange={setText} placeholder="Skill name" />}
+      <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', fontSize: 'var(--t-13)', cursor: 'pointer' }}>
+        <input type="checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} style={{ accentColor: 'var(--accent)', marginTop: 3 }} />
+        <span>I confirm this is true and happened where I selected. Verify it as a Profile fact that résumés may cite.</span>
+      </label>
       <div style={{ display: 'flex', gap: 6 }}>
-        <Button size="sm" busy={busy} disabled={!text.trim() || parent == null} onClick={save}>Save to profile</Button>
+        <Button size="sm" busy={busy} disabled={!text.trim() || parent == null || !confirmed} onClick={save}>Verify and save</Button>
         <Button size="sm" variant="secondary" onClick={() => setOpen(false)}>Cancel</Button>
         <RouterLink to="/profile" style={{ fontSize: 'var(--t-12)', alignSelf: 'center' }}>Other kind of fact → Profile</RouterLink>
       </div>
@@ -166,28 +183,140 @@ function AddContext({ gap, jobId, entries, onSaved, pushToast }) {
   )
 }
 
-function Gaps({ gaps, jobId, entries, onSaved, pushToast }) {
-  if (!gaps.length) return null
+function GapRow({ r, headlines, jobId, entries, onSaved, pushToast }) {
   return (
-    <Section title="Gap analysis" help="What tailoring may add, what it may rephrase, and what it will never claim.">
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 14 }}>
-        {GAP_GROUPS.map(([kind, title, help]) => {
-          const rows = gaps.filter((g) => g.kind === kind)
-          return (
-            <div key={kind} style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <Label size="lg">{title} · {rows.length}</Label>
-              <Helper size="xs">{help}</Helper>
-              {rows.map((g) => (
-                <div key={g.requirement_id} style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 'var(--t-13)', borderTop: '1px solid var(--line-soft)', paddingTop: 6 }}>
-                  <span>{g.requirement}</span>
-                  {(kind === 'cannot_claim' || kind === 'needs_clarification') &&
-                    <AddContext gap={g} jobId={jobId} entries={entries} onSaved={onSaved} pushToast={pushToast} />}
-                </div>
-              ))}
-            </div>
-          )
-        })}
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 5, padding: '10px 0', borderTop: '1px solid var(--line-soft)', fontSize: 'var(--t-13)' }}>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
+        <span style={{ flex: '1 1 260px', minWidth: 0 }}>{r.requirement}</span>
+        <Helper size="xs">{r.required ? 'required' : 'preferred'}</Helper>
+        {ACTIONABLE.includes(r.gap) && r.points_now > 0 && <Tag tone="accent" title="What this truthful change can add to Resume Applicability">+{r.points_now} pts</Tag>}
+        {!ACTIONABLE.includes(r.gap) && r.points_with_context > 0 && <Tag title="Only reachable with new, verified context">up to +{r.points_with_context} pts with context</Tag>}
       </div>
+      {r.source_quote && <Helper>Posting: “{r.source_quote}”</Helper>}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 10 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}><Label>Profile</Label><Tag tone={STATUS_TONE[r.candidate_status]}>{r.candidate_status}</Tag></div>
+          <EvidenceList refs={r.profile_evidence} headlines={headlines} />
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}><Label>This résumé</Label><Tag tone={RESUME_TONE[r.resume_status]}>{RESUME_LABEL[r.resume_status]}</Tag></div>
+          <EvidenceList refs={r.resume_evidence} headlines={headlines} empty="not shown" />
+        </div>
+      </div>
+      <Helper>Why: {r.reason}</Helper>
+      {!ACTIONABLE.includes(r.gap) && r.gap !== 'ALREADY_VISIBLE' && <AddContext gap={r} jobId={jobId} entries={entries} onSaved={onSaved} pushToast={pushToast} />}
+    </div>
+  )
+}
+
+function GapAudit({ audit, title, headlines, jobId, entries, onSaved, pushToast }) {
+  const [showVisible, setShowVisible] = useState(false)
+  if (!audit) return null
+  const eligibility = audit.rows.filter((r) => r.resume_status == null)
+  return (
+    <Section title={title} help="Each requirement: what your verified Profile proves, what this résumé shows, and why.">
+      {GAP_GROUPS.map(([kind, glyph, label, help]) => {
+        const rows = audit.rows.filter((r) => r.gap === kind)
+        if (!rows.length) return null
+        if (kind === 'ALREADY_VISIBLE' && !showVisible) {
+          return <Button key={kind} size="xs" variant="ghost" onClick={() => setShowVisible(true)} style={{ alignSelf: 'flex-start' }}>Show {rows.length} already visible</Button>
+        }
+        return (
+          <div key={kind} style={{ display: 'flex', flexDirection: 'column', paddingTop: 6 }}>
+            <Label size="lg">{glyph} {label} · {rows.length}</Label>
+            <Helper size="xs">{help}</Helper>
+            {rows.map((r) => <GapRow key={r.requirement_id} r={r} headlines={headlines} jobId={jobId} entries={entries} onSaved={onSaved} pushToast={pushToast} />)}
+          </div>
+        )
+      })}
+      {eligibility.length > 0 && (
+        <Helper>Eligibility (from your Profile answers, never scored): {eligibility.map((r) => `${r.requirement} — ${r.candidate_status}`).join(' · ')}</Helper>
+      )}
+    </Section>
+  )
+}
+
+function Figure({ label, value, sub }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+      <ScoreRing value={value} label="—" size={52} ariaLabel={`${label}: ${value ?? 'not available'}`} />
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 1, minWidth: 0 }}>
+        <Label>{label}</Label>
+        {sub && <Helper size="xs">{sub}</Helper>}
+      </div>
+    </div>
+  )
+}
+
+function ApplicabilitySummary({ ra, busy, auditing, onAudit, onGenerate, onCreateBase, creatingBase }) {
+  const { base, tailored: t, comparison: c } = ra
+  if (!base) {
+    return (
+      <Notice tone="quiet" glyph="○" action={<Button size="sm" busy={creatingBase} onClick={onCreateBase}>Create base résumé from Profile</Button>}>
+        <strong style={{ fontSize: 'var(--t-13)' }}>No base résumé to audit yet</strong>
+        <Helper>Resume Applicability audits one specific résumé. A base résumé renders your verified Profile facts; review and accept it on the <RouterLink to="/resumes">Resume</RouterLink> screen.</Helper>
+      </Notice>
+    )
+  }
+  const g = base.gap_counts || {}
+  return (
+    <Section title="Resume Applicability" help={ra.disclaimer}
+      right={<Button size="xs" variant="secondary" busy={auditing} onClick={onAudit} title="Re-run the audit on the base and tailored résumés and store the result">Audit résumé</Button>}>
+      <div style={{ display: 'flex', gap: 28, flexWrap: 'wrap', alignItems: 'center' }}>
+        <Figure label="Base résumé" value={base.score} sub={`${cap(base.version_status)} base${base.parser_health != null ? ` · Parser Health ${base.parser_health}` : ''}`} />
+        <Figure label="Maximum currently achievable" value={base.maximum} sub="what your verified Profile supports" />
+        {t && <Figure label="Tailored résumé" value={t.score} sub={`${c?.delta != null ? `${c.delta >= 0 ? '+' : ''}${c.delta} points · ` : ''}${cap(t.version_status)}`} />}
+      </div>
+      <span style={{ fontSize: 'var(--t-13)' }}>{(t || base).message}</span>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+        <Label>What keeps the base résumé from {ra.target}–95%</Label>
+        {[['SAFE_TO_ADD', '✓', 'var(--good)', 'safe addition(s) from your verified Profile'], ['SAFE_TO_REPHRASE', '~', 'var(--warn)', 'truthful rephrase(s)'],
+          ['NEEDS_CONTEXT', '?', 'var(--warn)', 'item(s) need more context'], ['CANNOT_CLAIM', '✗', 'var(--bad)', 'requirement(s) your Profile does not support']].map(([k, glyph, color, text]) => (
+          <span key={k} style={{ fontSize: 'var(--t-13)' }}><span aria-hidden="true" style={{ color, fontWeight: 'var(--weight-semibold)' }}>{glyph}</span> {g[k] || 0} {text}</span>
+        ))}
+      </div>
+      {!base.target_reachable && base.maximum != null && (
+        <Notice tone="warn"><Helper>{ra.target}–95% is not currently achievable without additional truthful experience or context. Tailoring will not invent the difference; answer the “Needs context” questions below if they apply to you.</Helper></Notice>
+      )}
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+        <Button size="sm" busy={busy} onClick={onGenerate}>{t ? 'Tailor again toward best truthful match' : 'Tailor toward best truthful match'}</Button>
+        <Helper size="xs">Verified facts only. Every bullet keeps its source facts, and a bullet that fails the claim audit counts for nothing.</Helper>
+      </div>
+    </Section>
+  )
+}
+
+function BeforeAfter({ ra, headlines }) {
+  const { base: b, tailored: t, comparison: c } = ra
+  if (!b || !t || !c) return null
+  const rows = [
+    ['Resume Applicability', `${b.score ?? '—'}%`, `${t.score ?? '—'}%`],
+    ['Parser Health', b.parser_health ?? '—', t.parser_health ?? '—'],
+    ['Required coverage', pct(b.coverage.required?.resume), pct(t.coverage.required?.resume)],
+    ['Preferred coverage', pct(b.coverage.preferred?.resume), pct(t.coverage.preferred?.resume)],
+  ]
+  return (
+    <Section title="Before and after" help="The same Resume Applicability audit, run on both résumés.">
+      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(160px, 1fr) 110px 110px', gap: '6px 12px', fontSize: 'var(--t-13)', maxWidth: 460 }}>
+        <span /><Label>Base</Label><Label>Tailored</Label>
+        {rows.map(([k, x, y]) => <React.Fragment key={k}><span>{k}</span><span>{x}</span><strong>{y}</strong></React.Fragment>)}
+      </div>
+      <span style={{ fontSize: 'var(--t-14)' }}>Improvement: <strong>{c.delta >= 0 ? '+' : ''}{c.delta} points</strong> · maximum supported {c.maximum}%</span>
+      {c.changes.length === 0 && <Helper>No requirement changed status.</Helper>}
+      {c.changes.map((ch) => (
+        <div key={ch.requirement_id} style={{ display: 'flex', flexDirection: 'column', gap: 2, borderTop: '1px solid var(--line-soft)', paddingTop: 6 }}>
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', fontSize: 'var(--t-13)' }}>
+            <span style={{ flex: '1 1 240px', minWidth: 0 }}>{ch.requirement}</span>
+            <Tag tone={RESUME_TONE[ch.from]}>{RESUME_LABEL[ch.from]}</Tag><span aria-hidden="true">→</span><Tag tone={RESUME_TONE[ch.to]}>{RESUME_LABEL[ch.to]}</Tag>
+            <Helper size="xs">{ch.points >= 0 ? '+' : ''}{ch.points} pts</Helper>
+          </div>
+          {ch.caused_by.length > 0 && <><Helper size="xs">Caused by these verified facts now on the page:</Helper><EvidenceList refs={ch.caused_by} headlines={headlines} /></>}
+          {ch.lost?.length > 0 && <><Helper size="xs">No longer counted — the bullet showing these is removed, failed the claim audit or awaits your review:</Helper><EvidenceList refs={ch.lost} headlines={headlines} /></>}
+        </div>
+      ))}
+      {t.excluded_bullets?.length > 0 && (
+        <Notice tone="warn"><Helper>{t.excluded_bullets.length} tailored bullet{t.excluded_bullets.length === 1 ? '' : 's'} failed the claim audit or still need review, and count for nothing until resolved below.</Helper></Notice>
+      )}
     </Section>
   )
 }
@@ -230,7 +359,8 @@ function Overview({ ws, job, busy, onAnalyze, onRematch, goEvidence, profile }) 
   const c = m?.counts || {}
   return (
     <>
-      <Section title="Match summary" right={<Button size="xs" variant="ghost" onClick={goEvidence}>Full breakdown →</Button>}>
+      <Section title="Candidate Fit" help="How much of this job everything verified in your Profile satisfies — independent of what fits on one résumé. Not an ATS score."
+        right={<Button size="xs" variant="ghost" onClick={goEvidence}>Full breakdown →</Button>}>
         {!m ? (
           <Helper>The requirements are extracted but not matched yet. <Button size="xs" variant="secondary" busy={busy} onClick={onRematch} style={{ display: 'inline-flex', marginLeft: 6 }}>Match now</Button></Helper>
         ) : (
@@ -239,8 +369,10 @@ function Overview({ ws, job, busy, onAnalyze, onRematch, goEvidence, profile }) 
               Your verified profile evidences <strong>{c.MATCHED || 0}</strong> of {reqs.length} requirements
               {c.PARTIAL ? <>, <strong>{c.PARTIAL}</strong> partially</> : null}.
               {' '}{(c.MISSING || 0) + (c.UNKNOWN || 0) === 1 ? '1 has' : `${(c.MISSING || 0) + (c.UNKNOWN || 0)} have`} no evidence.
+              {m.coverage && <> Required coverage <strong>{pct(m.coverage.required)}</strong>, preferred <strong>{pct(m.coverage.preferred)}</strong>.</>}
             </span>
-            {ws.stale && <Notice tone="warn" action={<Button size="sm" variant="secondary" busy={busy} onClick={ws.jd_stale ? onAnalyze : onRematch}>{ws.jd_stale ? 'Re-analyze' : 'Re-match'}</Button>}><Helper>{ws.jd_stale ? 'The job description changed since this analysis.' : 'Your profile changed since this match was computed.'}</Helper></Notice>}
+            {m.unavailable && <Notice tone="bad" action={<Button size="sm" variant="secondary" busy={busy} onClick={onRematch}>Re-match</Button>}><Helper>Match unavailable: {m.unavailable}. No score is shown rather than a misleading one.</Helper></Notice>}
+            {ws.stale && <Notice tone="warn" action={<Button size="sm" variant="secondary" busy={busy} onClick={ws.jd_stale ? onAnalyze : onRematch}>{ws.jd_stale ? 'Re-analyze' : 'Re-match'}</Button>}><Helper>{ws.jd_stale ? 'The job description changed since this analysis.' : ws.outdated ? 'This match used the retired Role Match scorer; re-match to compute Candidate Fit.' : 'Your profile changed since this match was computed.'}</Helper></Notice>}
             {m.hard_blockers?.length > 0 && (
               <Notice tone="bad">
                 <strong style={{ fontSize: 'var(--t-13)' }}>Hard requirements you do not meet</strong>
@@ -458,7 +590,9 @@ export function ResumeReview({ versionId, factHeadlines, onChanged, pushToast, o
   )
 }
 
-function ResumeTab({ ws, versions, selected, setSelected, reviewKey, busy, onAnalyze, onGenerate, factHeadlines, onChanged, pushToast }) {
+function ResumeTab({ ws, versions, selected, setSelected, reviewKey, busy, onAnalyze, onRematch, onGenerate, onAudit, auditing, onCreateBase, creatingBase,
+  factHeadlines, headlines, entries, onContextSaved, onChanged, pushToast }) {
+  const [which, setWhich] = useState('base')
   if (!ws.analysis) {
     return (
       <Notice tone="quiet" glyph="○" action={<Button size="sm" busy={busy} onClick={onAnalyze}>Analyze job</Button>}>
@@ -467,19 +601,28 @@ function ResumeTab({ ws, versions, selected, setSelected, reviewKey, busy, onAna
       </Notice>
     )
   }
-  if (!ws.match) {
-    return <Notice tone="quiet"><Helper>Waiting for the Role Match before a résumé can be drafted.</Helper></Notice>
-  }
-  if (!versions.length) {
+  if (!ws.match || ws.outdated) {
     return (
-      <Notice tone="quiet" glyph="✦" action={<Button size="sm" busy={busy} onClick={onGenerate}>Generate tailored résumé</Button>}>
-        <strong style={{ fontSize: 'var(--t-13)' }}>No tailored résumé for this job yet</strong>
-        <Helper>Drafted only from verified facts. Every changed claim is checked against its sources, and anything unsupported blocks the PDF until you deal with it.</Helper>
+      <Notice tone="quiet" action={<Button size="sm" busy={busy} onClick={onRematch}>Re-match</Button>}>
+        <Helper>{ws.outdated ? 'This job was scored by the retired Role Match formula. Re-match to compute Candidate Fit and audit your résumé.' : 'Waiting for Candidate Fit before a résumé can be audited or drafted.'}</Helper>
       </Notice>
     )
   }
+  const ra = ws.resume_audit
+  const shown = which === 'tailored' && ra?.tailored ? ra.tailored : ra?.base
   return (
     <>
+      {ra && <ApplicabilitySummary ra={ra} busy={busy} auditing={auditing} onAudit={onAudit} onGenerate={onGenerate} onCreateBase={onCreateBase} creatingBase={creatingBase} />}
+      {ra && <BeforeAfter ra={ra} headlines={headlines} />}
+      {ra?.base && ra?.tailored && (
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          <Label size="lg">Gap audit of</Label>
+          <Pill size="sm" on={which === 'base'} onClick={() => setWhich('base')}>Base résumé</Pill>
+          <Pill size="sm" on={which === 'tailored'} onClick={() => setWhich('tailored')}>Tailored résumé</Pill>
+        </div>
+      )}
+      <GapAudit audit={shown} title={`Gap audit · ${shown === ra?.tailored ? 'tailored' : 'base'} résumé`} headlines={headlines} jobId={ws.job.id}
+        entries={entries} onSaved={onContextSaved} pushToast={pushToast} />
       {versions.length > 1 && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <Label size="lg">Version</Label>
@@ -489,7 +632,7 @@ function ResumeTab({ ws, versions, selected, setSelected, reviewKey, busy, onAna
       )}
       {selected
         ? <ResumeReview key={`${selected}:${reviewKey}`} versionId={selected} factHeadlines={factHeadlines} onChanged={onChanged} pushToast={pushToast} onRegenerate={onGenerate} regenerating={busy} />
-        : <Helper>Every version for this job was rejected. <Button size="xs" busy={busy} onClick={onGenerate} style={{ display: 'inline-flex', marginLeft: 6 }}>Generate a new one</Button></Helper>}
+        : versions.length > 0 && <Helper>Every version for this job was rejected. <Button size="xs" busy={busy} onClick={onGenerate} style={{ display: 'inline-flex', marginLeft: 6 }}>Generate a new one</Button></Helper>}
     </>
   )
 }
@@ -562,7 +705,8 @@ export default function JobDetail() {
   const [selected, setSelected] = useState(null)
   const [profile, setProfile] = useState(null)
   const [privacy, setPrivacy] = useState(null)
-  const [settings, setSettings] = useState({})
+  const [auditing, setAuditing] = useState(false)
+  const [creatingBase, setCreatingBase] = useState(false)
   const [pending, setPending] = useState([])   // [{run_id, type, label}]
   const [reviewKey, setReviewKey] = useState(0)
   const [loadErr, setLoadErr] = useState(false)
@@ -581,7 +725,6 @@ export default function JobDetail() {
   useEffect(() => {
     api.get('/profile').then(({ data }) => setProfile(data)).catch(() => {})
     api.get('/copilot/privacy').then(({ data }) => setPrivacy(data)).catch(() => {})
-    api.get('/settings').then(({ data }) => setSettings(data || {})).catch(() => {})
     api.get('/resume-versions', { params: { status: 'accepted' } }).then(({ data }) => setAcceptedBase((data || []).find((x) => x.kind === 'base') || null)).catch(() => {})
   }, [])
 
@@ -629,8 +772,22 @@ export default function JobDetail() {
   const busy = pending.length > 0 || ws.running.length > 0
   const analyze = () => start(`/copilot/jobs/${id}/analyze`, 'copilot_analyze', 'Analysis')
   const rematch = () => start(`/copilot/jobs/${id}/match`, 'copilot_match', 'Re-match')
-  const generate = () => start(`/resume-versions/for-job/${id}`, 'copilot_resume', 'Résumé draft')
-  const score = ws.match?.score ?? null
+  const generate = () => start(`/resume-versions/for-job/${id}`, 'copilot_resume', 'Tailored résumé')
+  const auditNow = async () => {
+    setAuditing(true)
+    try { await api.post(`/copilot/jobs/${id}/resume-audit`, {}); pushToast({ kind: 'success', msg: 'Résumé audited and stored' }); await load() }
+    catch (e) { pushToast({ kind: 'error', msg: errMsg(e, 'Audit failed') }) } finally { setAuditing(false) }
+  }
+  const createBase = async () => {
+    setCreatingBase(true)
+    try { await api.post('/resume-versions/base'); pushToast({ kind: 'success', msg: 'Base résumé drafted from your Profile — accept it on the Resume screen when it looks right' }); await load() }
+    catch (e) { pushToast({ kind: 'error', msg: errMsg(e, 'Could not create a base résumé') }) } finally { setCreatingBase(false) }
+  }
+  const reloadProfile = () => { load(); api.get('/profile').then(({ data }) => setProfile(data)).catch(() => {}) }
+  const headlines = { ...factHeadlines, ...(ws.headlines || {}) }
+  const unavailable = ws.match?.unavailable
+  // a stale or unavailable match is not shown as a number
+  const score = ws.stale || unavailable ? null : (ws.match?.score ?? null)
   const tone = scoreTone(score)
   const a = ws.analysis || {}
   const saved = job ? job.status === 'saved' || !!job.saved : false
@@ -638,7 +795,7 @@ export default function JobDetail() {
     const on = !saved
     const changes = job.status === 'applied' ? { saved: on } : { saved: on, status: on ? 'saved' : 'new' }
     setJob((j) => ({ ...j, ...changes }))
-    try { await api.patch(`/jobs/${id}`, changes) } catch (e) { pushToast({ kind: 'error', msg: errMsg(e, 'Could not update this job') }); loadJob() }
+    try { await api.patch(`/jobs/${id}`, changes, { params: { legacy_score: false } }) } catch (e) { pushToast({ kind: 'error', msg: errMsg(e, 'Could not update this job') }); loadJob() }
   }
   const meta = [
     ws.job.location,
@@ -666,13 +823,14 @@ export default function JobDetail() {
             <Helper style={{ fontSize: 'var(--t-13)' }}>{meta.join(' · ')}</Helper>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '4px 14px 4px 4px', border: '1px solid var(--line)', borderRadius: 'var(--radius-card)', background: 'var(--recessed)' }}>
-            {busy && ws.running.length ? <ScoreRing busy size={56} /> : <ScoreRing value={score} label="—" size={56} ariaLabel={score != null ? `Role Match ${score} of 100` : 'No Role Match yet'} />}
+            {busy && ws.running.length ? <ScoreRing busy size={56} /> : <ScoreRing value={score} label={ws.stale && ws.match ? 'stale' : '—'} size={56} ariaLabel={score != null ? `Candidate Fit ${score} of 100` : 'No current Candidate Fit'} />}
             <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
-              <Label>Role Match</Label>
+              <Label title="Based on everything verified in your Profile. Not an ATS score.">Candidate Fit</Label>
               <span style={{ fontSize: 'var(--t-14)', fontWeight: 'var(--weight-semibold)', color: score != null ? `var(--${tone})` : 'var(--muted)' }}>
-                {score != null ? MATCH_LABEL[tone] : ws.needs_job_details ? 'Needs job details' : ws.analysis ? 'Not matched' : 'Not analyzed'}
+                {score != null ? MATCH_LABEL[tone] : ws.needs_job_details ? 'Needs job details' : unavailable ? 'Match unavailable'
+                  : ws.stale && ws.match ? (ws.outdated ? 'Old scoring — re-match' : ws.jd_stale ? 'Job changed — re-analyze' : 'Profile changed — re-match')
+                    : ws.analysis ? 'Not matched' : 'Not analyzed'}
               </span>
-              {ws.stale && score != null && <Helper size="xs">stale · {ws.jd_stale ? 'job details changed' : 'profile changed'}</Helper>}
             </div>
           </div>
         </div>
@@ -699,7 +857,8 @@ export default function JobDetail() {
           {tab === 'overview' && <Overview ws={ws} job={job} busy={busy} profile={profile} onAnalyze={analyze} onRematch={rematch} goEvidence={() => setTab('evidence')} />}
           {tab === 'resume' && (
             <ResumeTab ws={ws} versions={versions} selected={selected} setSelected={setSelected} reviewKey={reviewKey} busy={busy}
-              onAnalyze={analyze} onGenerate={generate} factHeadlines={factHeadlines} onChanged={load} pushToast={pushToast} />
+              onAnalyze={analyze} onRematch={rematch} onGenerate={generate} onAudit={auditNow} auditing={auditing} onCreateBase={createBase} creatingBase={creatingBase}
+              factHeadlines={factHeadlines} headlines={headlines} entries={contextEntries} onContextSaved={reloadProfile} onChanged={load} pushToast={pushToast} />
           )}
           {tab === 'application' && (
             <ApplicationTab ws={ws} job={job} versions={versions} acceptedBase={acceptedBase} pushToast={pushToast}
@@ -708,10 +867,9 @@ export default function JobDetail() {
           {tab === 'evidence' && (
             ws.analysis ? (
               <>
-                <MatchBreakdown match={ws.match} stale={ws.stale} minRecommended={settings.role_match_min_recommended ? Number(settings.role_match_min_recommended) : null} />
-                <RequirementMatrix requirements={ws.requirements} />
+                <ScoringMethod match={ws.match} audit={ws.resume_audit?.base} />
+                <RequirementMatrix requirements={ws.requirements} audit={ws.resume_audit?.base} headlines={headlines} />
                 <Provenance ws={ws} privacy={copilotPrivacy} />
-                <Gaps gaps={ws.gaps} jobId={id} entries={contextEntries} onSaved={() => { load(); api.get('/profile').then(({ data }) => setProfile(data)) }} pushToast={pushToast} />
               </>
             ) : <Notice tone="quiet"><Helper>No evidence yet — analyze the job first.</Helper></Notice>
           )}

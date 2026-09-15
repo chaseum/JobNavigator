@@ -1,37 +1,44 @@
-"""Role Match: deterministic scoring of LLM-extracted requirements against cited evidence.
+"""Candidate Fit: how much of a job the whole verified profile satisfies.
 
 The LLM extracts requirements and proposes which facts support each one. This
-module decides what that is worth, and it trusts nothing it cannot check:
-a MATCHED with no citation, or citing a fact that does not exist, earns nothing;
-a skill with no usage evidence earns partial credit at most; work authorization
-comes from the user's own answers, never the model. The number is evidence
-coverage, not any employer's ATS score.
+module decides what that is worth and trusts nothing it cannot check: every
+citation is normalized to a canonical provenance id and must name a verified
+fact; a MATCHED with no valid citation earns nothing; a skill with no usage
+evidence is partial at most; work authorization comes from the user's own
+answers. Then the deterministic rules in rules.py (degrees, technologies,
+experience types, years) raise, cap or replace the model's verdict, so a model
+that says MISSING never outvotes a degree the profile proves.
+
+The number is requirement coverage, not any employer's ATS score. Parser Health
+is not part of it, and neither is any legacy CV score.
 """
 import re
+from datetime import date
 
+from backend.copilot import facts as F
+from backend.copilot import rules as R
+
+# One weight table for Candidate Fit and Resume Applicability. Settings key role_match_weights overrides it.
 DEFAULT_WEIGHTS = {
-    "eligibility": 30,     # hard requirements: authorization, clearance, required degree / years
-    "required": 30,        # required qualifications
-    "preferred": 10,       # preferred qualifications
-    "experience": 15,      # responsibilities backed by experience
-    "technology": 10,      # technologies and domain terms
-    "parser_health": 5,    # the generated PDF parses cleanly
+    "required": 3.0,         # per required requirement, times its importance (1-3)
+    "preferred": 1.0,        # per preferred requirement, times its importance
+    "soft_skill": 0.5,       # multiplier: soft skills are rarely provable from facts
+    "responsibility": 0.5,   # multiplier: what the job does, not what it demands of you
 }
 CREDIT = {"MATCHED": 1.0, "PARTIAL": 0.5, "UNKNOWN": 0.0, "MISSING": 0.0}
-_ELIGIBILITY = {"work_authorization", "clearance"}
-_HARD_WHEN_REQUIRED = {"education", "experience"}
+ELIGIBILITY = {"work_authorization", "clearance"}
+FORMULA = ("weight = (required or preferred weight) × importance (1–3) × soft-skill / responsibility multiplier; "
+           "score = Σ weight × credit ÷ Σ weight × 100. Work authorization and clearance are eligibility checks, "
+           "listed separately and never scored.")
 
 
-def components_for(req: dict) -> list[str]:
-    cat, required = req.get("category"), bool(req.get("required"))
-    if cat in _ELIGIBILITY or (required and cat in _HARD_WHEN_REQUIRED):
-        return ["eligibility"]
-    if cat == "responsibility":
-        return ["experience"]
-    base = ["required" if required else "preferred"]
-    if cat in ("technology", "domain"):
-        base.append("technology")   # a required technology is both a requirement and terminology
-    return base
+def requirement_weight(req: dict, weights: dict) -> float:
+    w = float(weights["required"] if req.get("required") else weights["preferred"]) * int(req.get("importance") or 2)
+    if req.get("category") == "soft_skill":
+        w *= float(weights["soft_skill"])
+    elif req.get("category") == "responsibility":
+        w *= float(weights["responsibility"])
+    return w
 
 
 def _work_auth_verdict(text: str, identity: dict):
@@ -53,12 +60,31 @@ def _work_auth_verdict(text: str, identity: dict):
     return "UNKNOWN", []
 
 
-def sanitize_evidence(requirements: list[dict], matches: list[dict], facts_by_ref: dict, identity: dict) -> list[dict]:
+def check_citations(cited, facts_by_ref: dict, identity: dict) -> tuple[list, list]:
+    """(canonical verified ids, dropped raw strings) for what the model cited."""
+    valid, dropped = [], []
+    for raw in cited or []:
+        ref = F.normalize_ref(raw)
+        if ref is not None and (ref in facts_by_ref or ref in identity):
+            if ref not in valid:
+                valid.append(ref)
+        else:
+            dropped.append(raw)
+    return valid, dropped
+
+
+def sanitize_evidence(requirements: list[dict], matches: list[dict], facts_by_ref: dict, identity: dict,
+                      jd_technologies=(), today: date | None = None) -> list[dict]:
     """One checked evidence row per requirement, in requirement order.
 
-    `facts_by_ref` maps verified provenance ids to {"kind", "data"}; `identity`
-    maps "identity.<key>" to the user's answer.
+    `facts_by_ref` maps verified provenance ids to {"kind", "data", "parent"};
+    `identity` maps "identity.<key>" to the user's answer. Each row keeps the
+    model's raw verdict and citations next to the result, so every status change
+    can be traced.
     """
+    today = today or date.today()
+    units = R.profile_units(facts_by_ref)
+    vocab = R.vocabulary(facts_by_ref, jd_technologies)
     by_req = {}
     for m in matches or []:
         by_req.setdefault(m.get("requirement_id"), m)
@@ -66,17 +92,17 @@ def sanitize_evidence(requirements: list[dict], matches: list[dict], facts_by_re
     for req in requirements:
         rid = req["id"]
         m = by_req.get(rid) or {}
-        status = m.get("status") if m.get("status") in CREDIT else "UNKNOWN"
+        llm_status = m.get("status") if m.get("status") in CREDIT else None
+        status = llm_status or "UNKNOWN"
         note = m.get("explanation") or ""
-        cited = [s for s in dict.fromkeys(m.get("source_fact_ids") or [])]
-        valid = [s for s in cited if s in facts_by_ref or s in identity]
-        dropped = [s for s in cited if s not in valid]
+        original = list(m.get("source_fact_ids") or [])
+        valid, dropped = check_citations(original, facts_by_ref, identity)
 
         if req.get("category") == "work_authorization":
             status, valid = _work_auth_verdict(req.get("text"), identity)
             note = "from your work-authorization answers" if valid else "answer work authorization in your Profile"
         elif status in ("MATCHED", "PARTIAL") and not valid:
-            status, note = "MISSING", "no verified fact was cited"
+            status, note = "MISSING", "the model cited no verified fact" + (f" (dropped: {', '.join(map(str, dropped))})" if dropped else "")
         elif status == "MATCHED" and all(
             facts_by_ref.get(s, {}).get("kind") == "skill" and not (facts_by_ref[s].get("data") or {}).get("evidence_ids")
             for s in valid
@@ -85,45 +111,47 @@ def sanitize_evidence(requirements: list[dict], matches: list[dict], facts_by_re
             status, note = "PARTIAL", "skill listed without linked usage evidence"
         if status in ("MISSING", "UNKNOWN") and req.get("category") != "work_authorization":
             valid = []
-        row = {"requirement_id": rid, "status": status, "source_fact_ids": valid, "explanation": note}
-        if dropped:
-            row["dropped_ids"] = dropped
+        row = {"requirement_id": rid, "status": status, "source_fact_ids": valid, "explanation": note,
+               "llm_status": llm_status, "llm_explanation": m.get("explanation") or "",
+               "original_source_fact_ids": original,
+               "normalized_source_fact_ids": [F.normalize_ref(s) for s in original if F.normalize_ref(s)],
+               "dropped_source_fact_ids": dropped}
+        if req.get("category") not in ELIGIBILITY:
+            row = R.combine(row, R.evaluate(req, units, vocab, today))
         out.append(row)
     return out
 
 
-def score(requirements: list[dict], evidence: list[dict], weights: dict | None = None, parser_health: float | None = None) -> dict:
-    """Overall 0-100 plus every component; a component with nothing to measure is left out and the rest re-weighted."""
-    weights = {**DEFAULT_WEIGHTS, **(weights or {})}
+def score(requirements: list[dict], evidence: list[dict], weights: dict | None = None) -> dict:
+    """Candidate Fit 0-100 (None when nothing is scorable), required/preferred coverage and hard blockers."""
+    w = {**DEFAULT_WEIGHTS, **(weights or {})}
     status = {e["requirement_id"]: e["status"] for e in evidence}
-    comps = {name: {"earned": 0.0, "possible": 0.0} for name in DEFAULT_WEIGHTS}
+    earned = possible = 0.0
+    cov = {"required": [0.0, 0.0], "preferred": [0.0, 0.0]}
+    counts = {k: 0 for k in CREDIT}
     blockers = []
     for req in requirements:
         st = status.get(req["id"], "UNKNOWN")
-        w = int(req.get("importance") or 2)
-        for c in components_for(req):
-            comps[c]["possible"] += w
-            comps[c]["earned"] += w * CREDIT[st]
-        if "eligibility" in components_for(req) and st == "MISSING":
+        counts[st] += 1
+        if req.get("category") in ELIGIBILITY:
+            if st == "MISSING":
+                blockers.append(req["text"])
+            continue
+        if req.get("required") and req.get("category") == "education" and st == "MISSING":
             blockers.append(req["text"])
-    if parser_health is not None:
-        comps["parser_health"] = {"earned": max(0.0, min(100.0, parser_health)) / 100, "possible": 1.0}
-
-    active = {c: float(weights.get(c) or 0) for c, v in comps.items() if v["possible"] > 0}
-    total = sum(active.values())
-    overall = sum(active[c] * comps[c]["earned"] / comps[c]["possible"] for c in active) / total * 100 if total else 0.0
-    counts = {k: 0 for k in CREDIT}
-    for req in requirements:
-        counts[status.get(req["id"], "UNKNOWN")] += 1
+        rw = requirement_weight(req, w)
+        earned += rw * CREDIT[st]
+        possible += rw
+        c = cov["required" if req.get("required") else "preferred"]
+        c[0] += rw * CREDIT[st]
+        c[1] += rw
     return {
-        "score": round(overall),
-        "components": [
-            {"name": c, "weight": weights.get(c, 0), "effective_weight": round(active[c] / total * 100, 1) if c in active and total else 0,
-             "coverage": round(comps[c]["earned"] / comps[c]["possible"], 3) if comps[c]["possible"] else None}
-            for c in DEFAULT_WEIGHTS
-        ],
+        "score": round(earned / possible * 100) if possible else None,
+        "coverage": {k: (round(a / b, 3) if b else None) for k, (a, b) in cov.items()},
         "counts": counts,
         "hard_blockers": blockers,
+        "weights": w,
+        "formula": FORMULA,
     }
 
 
@@ -131,38 +159,5 @@ _STOP = {"with", "and", "the", "for", "from", "that", "this", "have", "experienc
          "strong", "knowledge", "ability", "working", "work", "including", "skills", "understanding", "familiarity", "plus"}
 
 
-def _terms(text: str) -> list[str]:
+def terms(text: str) -> list[str]:
     return [w for w in re.findall(r"[a-z0-9+#.]+", (text or "").lower()) if len(w) > 2 and w not in _STOP]
-
-
-def gaps(requirements: list[dict], evidence: list[dict], resume_text: str | None, resume_refs: set | None) -> list[dict]:
-    """Safe to add / safe to rephrase / cannot claim / needs clarification, per requirement.
-
-    `resume_refs` are the fact ids the current résumé already uses (None when there
-    is no résumé yet, so every supported requirement is "safe to add").
-    """
-    by_id = {e["requirement_id"]: e for e in evidence}
-    text = (resume_text or "").lower()
-    out = []
-    for req in requirements:
-        e = by_id.get(req["id"], {"status": "UNKNOWN", "source_fact_ids": []})
-        src = e.get("source_fact_ids") or []
-        base = {"requirement_id": req["id"], "requirement": req["text"], "source_fact_ids": src}
-        if e["status"] == "MISSING":
-            out.append({**base, "kind": "cannot_claim", "note": "No fact in your profile supports this. It will not be added to a résumé."})
-        elif e["status"] in ("UNKNOWN", "PARTIAL"):
-            out.append({**base, "kind": "needs_clarification",
-                        "note": e.get("explanation") or "Add detail to your profile if you have real experience here."})
-        else:
-            facts_src = [s for s in src if not s.startswith("identity.")]
-            if not facts_src:
-                continue
-            if resume_refs is None or any(s not in resume_refs for s in facts_src):
-                out.append({**base, "kind": "safe_to_add", "note": "Supported by your profile but not on your current résumé."})
-            else:
-                terms = _terms(req["text"])
-                present = sum(1 for t in terms if t in text)
-                if terms and present / len(terms) < 0.6:
-                    out.append({**base, "kind": "safe_to_rephrase",
-                                "note": "Your résumé covers this with different wording; the job's terms can be used where accurate."})
-    return out

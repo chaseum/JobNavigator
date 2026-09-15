@@ -48,8 +48,9 @@ DEFAULT_SETTINGS = {
     "copilot_llm_provider": ("", "Provider for job analysis, evidence matching, résumé writing and audit (empty = Primary)"),
     "copilot_llm_model": ("", "Model for job analysis / résumé pipeline (empty = Primary)"),
     "copilot_llm_api_key": ("", "API key for the copilot provider override"),
-    "role_match_weights": (json.dumps({"eligibility": 30, "required": 30, "preferred": 10, "experience": 15, "technology": 10, "parser_health": 5}),
-                           "Role Match component weights (JSON). Components with nothing to measure are left out and the rest re-weighted."),
+    "role_match_weights": (json.dumps({"required": 3, "preferred": 1, "soft_skill": 0.5, "responsibility": 0.5}),
+                           "Candidate Fit and Resume Applicability weights (JSON): required / preferred weight per requirement "
+                           "(times its importance 1-3); soft_skill and responsibility multiply those. Eligibility is never scored."),
     "role_match_min_recommended": ("70", "Role Match at or above which a job is marked recommended"),
     "resume_template": ("default", "LaTeX résumé template folder under backend/resume/templates"),
     "resume_page_target": ("1", "Target résumé length in pages; a longer PDF is flagged"),
@@ -443,7 +444,7 @@ def invalid_setting_values(updates: dict) -> list:
             try:
                 w = json.loads(value) if isinstance(value, str) else value
                 ok = isinstance(w, dict) and all(
-                    k in ("eligibility", "required", "preferred", "experience", "technology", "parser_health")
+                    k in ("required", "preferred", "soft_skill", "responsibility")
                     and isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0 for k, v in w.items())
             except ValueError:
                 ok = False
@@ -740,6 +741,20 @@ END $$;""",
         # counting it while its newest ScrapeLog row is no newer than this stamp.
         "ALTER TABLE searches ADD COLUMN IF NOT EXISTS warning_acknowledged_at TIMESTAMPTZ",
         "ALTER TABLE companies ADD COLUMN IF NOT EXISTS warning_acknowledged_at TIMESTAMPTZ",
+        # Candidate Fit lives on job_analyses only. The old matcher also wrote it into cv_scores as "Role Match",
+        # where best_cv_score took max() over it and legacy CV scores. Drop that derived key and recompute the
+        # legacy best from what remains; real legacy scores are untouched. Idempotent.
+        """UPDATE jobs SET
+            best_cv_score = (SELECT MAX(CAST(value AS FLOAT)) FROM jsonb_each_text(cv_scores::jsonb - 'Role Match')
+                             WHERE value ~ '^[0-9]+(\\.[0-9]+)?$'),
+            best_cv = (SELECT key FROM jsonb_each_text(cv_scores::jsonb - 'Role Match')
+                       WHERE value ~ '^[0-9]+(\\.[0-9]+)?$' ORDER BY CAST(value AS FLOAT) DESC LIMIT 1),
+            cv_scores = (cv_scores::jsonb - 'Role Match')::json
+          WHERE cv_scores IS NOT NULL AND jsonb_typeof(cv_scores::jsonb) = 'object' AND cv_scores::jsonb ? 'Role Match'""",
+        # The old component weights mean nothing to the new formula; replace them only if never edited.
+        """UPDATE settings SET value = '{"required": 3, "preferred": 1, "soft_skill": 0.5, "responsibility": 0.5}'
+          WHERE key = 'role_match_weights'
+            AND value = '{"eligibility": 30, "required": 30, "preferred": 10, "experience": 15, "technology": 10, "parser_health": 5}'""",
     ]
     run_migration_statements(db, migrations)
 

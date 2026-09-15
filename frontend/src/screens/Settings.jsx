@@ -373,9 +373,9 @@ export default function Settings() {
             label: 'OK',
           })
         }),
-        E('Role Match weights', 'Share of the score per component; a component with nothing to measure is left out and the rest re-weighted.', 'role_match_weights',
-          { json: true, sub: 'JSON: eligibility, required, preferred, experience, technology, parser_health' }),
-        B('Recommended minimum', 'Role Match at or above which a job reads as recommended.', 'role_match_min_recommended', { int: true, w: '90px' }),
+        E('Scoring weights', 'Candidate Fit and Resume Applicability: weight per required / preferred requirement × its importance; soft_skill and responsibility multiply that. Eligibility is never scored.', 'role_match_weights',
+          { json: true, sub: 'JSON: required, preferred, soft_skill, responsibility' }),
+        B('Recommended minimum', 'Candidate Fit at or above which a job reads as recommended.', 'role_match_min_recommended', { int: true, w: '90px' }),
         SEL('Résumé template', 'LaTeX template folder under backend/resume/templates.', 'resume_template', [['default', 'default']], { dflt: 'default', w: '240px' }),
         B('Page target', 'A compiled résumé longer than this is flagged in Parser Health.', 'resume_page_target', { int: true, w: '90px' }),
         SEL('Projects on tailored résumés', 'Whether tailoring may swap in different projects or only reorder the base ones.', 'resume_project_policy',

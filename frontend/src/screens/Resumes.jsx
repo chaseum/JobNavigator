@@ -142,7 +142,7 @@ export default function Resumes() {
                             {r.kind === 'tailored'
                               ? (r.job_id ? <RouterLink to={`/jobs/${r.job_id}`} onClick={(e) => e.stopPropagation()} style={{ color: 'var(--text-2)' }}>{r.title || 'Role'}</RouterLink> : <span>{r.title || '—'}</span>)
                               : <Helper style={{ fontSize: 'var(--t-13)' }}>All jobs</Helper>}
-                            {r.match_score != null && <Helper> · Role Match {r.match_score}</Helper>}
+                            {r.match_score != null && <Helper> · Candidate Fit {r.match_score}</Helper>}
                           </td>
                           <td style={{ ...CELL, color: 'var(--muted)' }} title={new Date(r.accepted_at || r.created_at).toLocaleString()}>{ago(r.accepted_at || r.created_at)}</td>
                           <td style={{ ...CELL, color: 'var(--muted)' }} title={new Date(r.created_at).toLocaleString()}>{ago(r.created_at)}</td>
