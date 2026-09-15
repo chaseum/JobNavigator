@@ -39,6 +39,81 @@ def _resolve_group_names(page_text: str, filter_ids: set) -> set:
     return names
 
 
+def _description(posting: dict) -> str | None:
+    """Prefer Ashby's plain-text field, keeping HTML paragraph/list boundaries as fallback."""
+    plain = (posting.get("descriptionPlain") or posting.get("descriptionPlainText") or "").strip()
+    if plain:
+        return plain
+    markup = posting.get("descriptionHtml") or ""
+    if not markup:
+        return None
+    from bs4 import BeautifulSoup
+    return BeautifulSoup(markup, "html.parser").get_text(separator="\n", strip=True) or None
+
+
+def _salary(posting: dict) -> dict:
+    """Read only structured Salary components; never treat equity/bonus as base pay."""
+    compensation = posting.get("compensation") or {}
+    if not compensation:
+        compensation = posting
+    components = []
+    for tier in compensation.get("compensationTiers") or []:
+        components.extend((tier or {}).get("components") or [])
+    if not components:
+        components = compensation.get("summaryComponents") or []
+    salaries = [c for c in components if (c or {}).get("compensationType", "Salary").lower() == "salary"
+                and (c or {}).get("minValue") is not None and (c or {}).get("maxValue") is not None]
+    if not salaries:
+        return {}
+    currencies = {c.get("currencyCode") for c in salaries if c.get("currencyCode")}
+    intervals = {c.get("interval") for c in salaries if c.get("interval")}
+    if len(currencies) > 1 or len(intervals) > 1:
+        return {}
+    low = min(float(c["minValue"]) for c in salaries)
+    high = max(float(c["maxValue"]) for c in salaries)
+    interval = next(iter(intervals), None)
+    period = {"1 YEAR": "yearly", "1 MONTH": "monthly", "1 WEEK": "weekly", "1 DAY": "daily", "1 HOUR": "hourly"}.get(interval, interval)
+    return {
+        "salary_min": round(low), "salary_max": round(high),
+        "salary_currency": next(iter(currencies), None), "salary_period": period,
+        "salary_source": "posting_ats",
+    }
+
+
+async def fetch_posting(url: str) -> dict | None:
+    """Fetch one published Ashby job with its public structured compensation."""
+    if not is_ashby(url):
+        return None
+    parsed = urlparse(url)
+    parts = [p for p in parsed.path.strip("/").split("/") if p]
+    if len(parts) < 2:
+        return None
+    slug, posting_id = parts[0], parts[1]
+    api_url = f"https://api.ashbyhq.com/posting-api/job-board/{slug}"
+    async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+        resp = await client.get(api_url, params={"includeCompensation": "true"})
+        if resp.status_code != 200:
+            return None
+        postings = resp.json().get("jobs") or []
+    posting = next((p for p in postings if str(p.get("id") or "") == posting_id), None)
+    if not posting:
+        return None
+    secondary = [x.get("location") for x in posting.get("secondaryLocations") or []
+                 if isinstance(x, dict) and x.get("location")]
+    out = {
+        "id": posting.get("id"), "title": posting.get("title"),
+        "canonical_url": posting.get("jobUrl"), "apply_url": posting.get("applyUrl"),
+        "location": posting.get("location"), "secondary_locations": secondary,
+        "department": posting.get("department"), "team": posting.get("team"),
+        "remote": posting.get("isRemote"), "arrangement": posting.get("workplaceType"),
+        "description": _description(posting), "published_at": posting.get("publishedAt"),
+        "employment_type": posting.get("employmentType"),
+        "compensation": posting.get("compensation") or {},
+    }
+    out.update(_salary(posting))
+    return out
+
+
 async def scrape(url: str, debug: bool = False) -> list[dict] | tuple:
     """Fetch jobs from Ashby's public JSON API; departmentId/locationId filtering is applied
     client-side since the API returns all jobs unfiltered."""
@@ -62,7 +137,7 @@ async def scrape(url: str, debug: bool = False) -> list[dict] | tuple:
     rejected = []
 
     async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-        resp = await client.get(api_url)
+        resp = await client.get(api_url, params={"includeCompensation": "true"})
         if resp.status_code != 200:
             logger.warning(f"Ashby API returned {resp.status_code} for {company_slug}")
             if debug:
@@ -131,7 +206,17 @@ async def scrape(url: str, debug: bool = False) -> list[dict] | tuple:
                 jobs.append({"title": title, "url": job_url,
                              "location": job_loc or None,
                              "locations": [x for x in ([job_loc] + secondary) if x],
-                             "arrangement": posting.get("workplaceType") or None})
+                             "arrangement": posting.get("workplaceType") or None,
+                             "id": posting.get("id"),
+                             "canonical_url": posting.get("jobUrl"),
+                             "apply_url": posting.get("applyUrl"),
+                             "department": posting.get("department"),
+                             "team": posting.get("team"),
+                             "remote": posting.get("isRemote"),
+                             "description": _description(posting),
+                             "published_at": posting.get("publishedAt"),
+                             "employment_type": posting.get("employmentType"),
+                             **_salary(posting)})
             elif debug:
                 rejected.append({"title": title, "url": job_url, "selector": "ashby_api", "reason": reason})
 

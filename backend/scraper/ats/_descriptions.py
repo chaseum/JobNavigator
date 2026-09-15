@@ -22,6 +22,71 @@ logger = logging.getLogger("jobnavigator.scraper.ats.descriptions")
 _GH_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 
+def _jobposting_jsonld(soup: BeautifulSoup, job: dict | None = None) -> str | None:
+    """Read structured JobPosting JSON-LD before generic page chrome is stripped."""
+    def objects(value):
+        if isinstance(value, list):
+            for item in value:
+                yield from objects(item)
+        elif isinstance(value, dict):
+            kinds = value.get("@type") or []
+            if isinstance(kinds, str):
+                kinds = [kinds]
+            if any(str(kind).casefold() == "jobposting" for kind in kinds):
+                yield value
+            for key in ("@graph", "mainEntity", "itemListElement"):
+                if key in value:
+                    yield from objects(value[key])
+
+    postings = []
+    for script in soup.find_all("script", attrs={"type": re.compile(r"application/ld\+json", re.I)}):
+        try:
+            postings.extend(objects(json.loads(script.string or script.get_text())))
+        except (TypeError, ValueError):
+            continue
+    if not postings:
+        return None
+    wanted_title = str((job or {}).get("title") or "").casefold()
+    posting = next((p for p in postings if not wanted_title or wanted_title in str(p.get("title") or "").casefold()), postings[0])
+    description = posting.get("description")
+    if isinstance(description, dict):
+        description = description.get("text") or description.get("value")
+    if not isinstance(description, str) or not description.strip():
+        return None
+
+    if job is not None:
+        job["employment_type"] = posting.get("employmentType")
+        job["published_at"] = posting.get("datePosted")
+        if str(posting.get("jobLocationType") or "").upper() == "TELECOMMUTE":
+            job["arrangement"] = "Remote"
+        location = posting.get("jobLocation") or {}
+        address = location.get("address") if isinstance(location, dict) else None
+        if isinstance(address, list):
+            address = address[0] if address else None
+        if isinstance(address, dict):
+            place = ", ".join(str(address.get(key)).strip() for key in
+                               ("addressLocality", "addressRegion", "addressCountry") if address.get(key))
+            if place:
+                job["location"] = place
+        salary = posting.get("baseSalary") or {}
+        salary_value = salary.get("value") if isinstance(salary, dict) else None
+        if isinstance(salary_value, dict):
+            low, high = salary_value.get("minValue"), salary_value.get("maxValue")
+            if low is None:
+                low = salary_value.get("value")
+            if high is None:
+                high = low
+            if low is not None:
+                job.update({"salary_min": round(float(low)), "salary_max": round(float(high)),
+                            "salary_currency": salary.get("currency"),
+                            "salary_period": {"year": "yearly", "years": "yearly", "hour": "hourly",
+                                              "month": "monthly", "week": "weekly", "day": "daily"}.get(
+                                                  str(salary_value.get("unitText") or "year").lower(),
+                                                  str(salary_value.get("unitText") or "").lower()),
+                            "salary_source": "posting_description"})
+    return BeautifulSoup(description, "html.parser").get_text("\n", strip=True)
+
+
 @functools.lru_cache(maxsize=256)
 def _resolve_branded_greenhouse_slug(host: str) -> str | None:
     """Look up the Greenhouse board slug for a customer host like `careers.nebius.com` by walking Company.scrape_urls; cached for process lifetime, and synchronous — callers must wrap with `asyncio.to_thread()`."""
@@ -101,6 +166,9 @@ async def _fetch_job_description(url: str, job: dict = None) -> str | None:
         resp = await safe_get(url, timeout=15, headers={"User-Agent": _USER_AGENT})
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
+        structured = _jobposting_jsonld(soup, job=job)
+        if structured and len(structured.strip()) >= 50:
+            return structured[:30_000]
         for tag in soup.find_all(["script", "style", "nav", "footer", "header", "noscript", "svg", "img"]):
             tag.decompose()
         text = soup.get_text(separator="\n", strip=True)[:30_000]

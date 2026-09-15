@@ -565,6 +565,17 @@ def run_migration_statements(db, statements) -> list:
 def run_migrations(db):
     """Run ALTER TABLE migrations for columns that create_all() won't add to existing tables."""
     migrations = [
+        "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS source_url VARCHAR",
+        "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS canonical_url VARCHAR",
+        "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS apply_url VARCHAR",
+        "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS description_source VARCHAR",
+        "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS description_quality INTEGER",
+        "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS description_fetched_at TIMESTAMPTZ",
+        "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS salary_currency VARCHAR(3)",
+        "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS salary_period VARCHAR",
+        "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS employment_type VARCHAR",
+        "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS published_at TIMESTAMPTZ",
+        "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS enrichment_sources JSONB",
         "ALTER TABLE companies ADD COLUMN IF NOT EXISTS h1b_slug VARCHAR",
         "ALTER TABLE searches ADD COLUMN IF NOT EXISTS company_exclude JSONB DEFAULT '[]'",
         "ALTER TABLE searches ADD COLUMN IF NOT EXISTS max_pages INTEGER DEFAULT 50",

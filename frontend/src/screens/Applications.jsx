@@ -25,10 +25,12 @@ const fmtWhen = (iso) => {
   if (isNaN(dt)) return ''
   return dt.toLocaleString(undefined, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
 }
-const fmtSalary = (lo, hi) => {
-  const k = (v) => `$${Math.round(v / 1000)}K`
-  if (lo && hi && lo !== hi) return `${k(lo)}–${k(hi)}`
-  return lo || hi ? k(lo || hi) : ''
+const fmtSalary = (lo, hi, currency, period, source) => {
+  const f = (v) => `${currency === 'USD' ? '$' : currency ? `${currency} ` : ''}${v >= 10000 ? `${Math.round(v / 1000)}K` : Math.round(v).toLocaleString()}`
+  if (!lo && !hi) return ''
+  const range = lo && hi && lo !== hi ? `${f(lo)}–${f(hi)}` : f(lo || hi)
+  const approximate = source === 'lca_estimate' ? '~' : ''
+  return `${approximate}${range}${({ yearly: '/yr', monthly: '/mo', weekly: '/wk', daily: '/day', hourly: '/hr' })[String(period || '').toLowerCase()] || ''}`
 }
 
 const srcLabel = (v) => ({
@@ -532,7 +534,9 @@ function Detail({ d, history, menuOpen, setMenuOpen, onStage, onNotes, onDelete,
                   // separate closure, so each of these arrives as a prop, like canAddInterview.
                   editIv, setEditIv, ivDraft, setIvDraft, openIvEdit, saveInterview,
                   addInterview, canAddInterview, delInterview, toggleInterview, openPrep }) {
-  const meta = [fmtSalary(d.salary_min, d.salary_max), d.location].filter(Boolean).join(' · ') || 'No posting details captured'
+  const salary = [fmtSalary(d.salary_min, d.salary_max, d.salary_currency, d.salary_period, d.salary_source),
+    d.salary_source === 'lca_estimate' ? 'H-1B filing estimate' : ['posting_ats', 'posting_description'].includes(d.salary_source) ? 'posting' : null].filter(Boolean).join(' · ')
+  const meta = [salary, d.location].filter(Boolean).join(' · ') || 'No posting details captured'
   const cv = d.tailored_resume_name || d.cv_version_used || d.best_cv || 'unknown résumé'
   const ivs = d.interviews || []
 

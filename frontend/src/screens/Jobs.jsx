@@ -32,10 +32,13 @@ const LOGO_TONES = ['greenhouse', 'lever', 'ashby', 'phenom', 'smartrecruiters',
 const errMsg = (e, fb) => (typeof e?.response?.data?.detail === 'string' ? e.response.data.detail : fb)
 // sentence case: "full-time" -> "Full-time", "entry level" -> "Entry level"
 export const cap = (s) => { const t = String(s || ''); return t.charAt(0).toUpperCase() + t.slice(1) }
-export const fmtSalary = (min, max) => {
+export const fmtSalary = (min, max, currency, period, source) => {
   if (!min && !max) return null
-  const f = (v) => `$${Math.round(v / 1000)}K`
-  return `${min && max && min !== max ? `${f(min)} – ${f(max)}` : f(min || max)}/yr`
+  const symbol = currency === 'USD' ? '$' : currency ? `${currency} ` : ''
+  const f = (v) => `${symbol}${v >= 10000 ? `${Math.round(v / 1000)}K` : Math.round(v).toLocaleString()}`
+  const suffix = ({ yearly: '/yr', monthly: '/mo', weekly: '/wk', daily: '/day', hourly: '/hr' })[String(period || '').toLowerCase()] || ''
+  const approximate = source === 'lca_estimate' ? '~' : ''
+  return `${approximate}${min && max && min !== max ? `${f(min)} – ${f(max)}` : f(min || max)}${suffix}`
 }
 const loadPrefs = () => { try { return JSON.parse(localStorage.getItem(PREFS_KEY)) || {} } catch { return {} } }
 
@@ -71,7 +74,7 @@ const Reason = ({ ok, children }) => (
   </span>
 )
 
-function MatchPanel({ rm, analyzing, onAnalyze }) {
+function MatchPanel({ rm, needsDetails, analyzing, onAnalyze }) {
   const score = rm?.score ?? null
   const tone = scoreTone(score)
   return (
@@ -93,6 +96,12 @@ function MatchPanel({ rm, analyzing, onAnalyze }) {
             {rm.hard_blockers > 0 && <Tag tone="bad" title="Hard requirements your profile does not meet">{rm.hard_blockers} blocker{rm.hard_blockers === 1 ? '' : 's'}</Tag>}
             {rm.stale && <Tag tone="warn" title="Your profile changed since this match — re-match from the job">stale</Tag>}
           </div>
+        </>
+      ) : needsDetails ? (
+        <>
+          <ScoreRing value={null} label="—" size="md" />
+          <Helper>Needs job details</Helper>
+          <Button size="xs" variant="secondary" onClick={(e) => { e?.stopPropagation?.(); onAnalyze() }}>Get details</Button>
         </>
       ) : (
         <>
@@ -140,7 +149,7 @@ function JobCard({ job, analyzing, onSave, onHide, onAnalyze }) {
           <Meta Icon={Building2} text={arrangement} />
           <Meta Icon={Clock} text={cap(rm?.employment_type)} />
           <Meta Icon={GraduationCap} text={level} title="Seniority and years of experience the posting asks for" />
-          <Meta Icon={DollarSign} text={fmtSalary(job.salary_min, job.salary_max)} title={job.salary_source === 'lca_estimate' ? 'Estimated from H-1B filings' : undefined} />
+          <Meta Icon={DollarSign} text={fmtSalary(job.salary_min, job.salary_max, job.salary_currency, job.salary_period, job.salary_source)} title={job.salary_source === 'lca_estimate' ? 'H-1B filing estimate' : job.salary_source === 'posting_ats' ? 'Employer-posted compensation · ATS' : job.salary_source === 'posting_description' ? 'Employer-posted compensation · job description' : job.salary_source?.startsWith('jobspy_') ? 'Compensation reported by JobSpy; pay period and currency are retained' : undefined} />
         </div>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8, flexWrap: 'wrap' }}>
           <IconButton size={36} title="Hide this job" onClick={stop(onHide)}><EyeOff size={15} aria-hidden="true" /></IconButton>
@@ -154,7 +163,7 @@ function JobCard({ job, analyzing, onSave, onHide, onAnalyze }) {
           </Button>
         </div>
       </div>
-      <MatchPanel rm={rm} analyzing={analyzing} onAnalyze={onAnalyze} />
+      <MatchPanel rm={rm} needsDetails={job.needs_job_details} analyzing={analyzing} onAnalyze={onAnalyze} />
     </article>
   )
 }

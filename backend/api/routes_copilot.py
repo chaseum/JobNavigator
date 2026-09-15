@@ -1,5 +1,6 @@
 """Copilot workflow per job: analysis, Role Match, gaps, adding context, privacy."""
 import logging
+import hashlib
 import uuid as _uuid
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -40,7 +41,9 @@ def _launch(kind: str, func, job_id: str):
 @router.post("/jobs/{job_id}/analyze", status_code=202)
 async def analyze_job(job_id: str, db: Session = Depends(get_db)):
     job = _job_or_404(db, job_id)
-    if not ((job.description or "").strip() or (job.url or "").strip() or (job.cached_page_text or "").strip()):
+    if not ((job.description or "").strip() or (job.canonical_url or "").strip()
+            or (job.url or "").strip() or (job.source_url or "").strip()
+            or (job.cached_page_text or "").strip()):
         raise HTTPException(400, "job has no description or URL to analyze")
     return _launch("copilot_analyze", run_analysis, job_id)
 
@@ -66,20 +69,35 @@ def current_resume_context(db, job_id):
 def job_workspace(job_id: str, db: Session = Depends(get_db)):
     job = _job_or_404(db, job_id)
     rec = latest_record(db, job_id)
+    from backend.scraper.enrichment import validate_job_description
+    jd_quality = validate_job_description(job, job.description, job.description_source)
+    needs_details = not jd_quality.valid
     headlines = {F.fact_ref(f): F.fact_headline(f.kind, f.data or {}) for f in db.query(CandidateFact).all()}
     from backend.models.db import Persona
     persona = db.query(Persona).filter(Persona.id == 1).first()
     headlines.update({ref: F.identity_headline(ref, v) for ref, v in F.identity_facts(persona).items()})
     app = db.query(Application).filter(Application.job_id == job.id).order_by(Application.applied_at.desc()).first()
     out = {
-        "job": {"id": str(job.id), "short_id": job.short_id, "company": job.company, "title": job.title, "url": job.url,
-                "location": job.location, "status": job.status, "has_description": bool((job.description or "").strip())},
+        "job": {"id": str(job.id), "short_id": job.short_id, "company": job.company, "title": job.title,
+                "url": job.apply_url or job.canonical_url or job.url, "canonical_url": job.canonical_url,
+                "apply_url": job.apply_url, "source_url": job.source_url, "description": job.description,
+                "description_source": job.description_source, "description_quality": job.description_quality,
+                "needs_job_details": needs_details, "location": job.location, "status": job.status,
+                "has_description": not needs_details},
         "analysis": None, "requirements": [], "match": None, "gaps": [],
         "stale": False,
         "running": [k for k in ("copilot_analyze", "copilot_match") if is_running(k, str(job_id))],
         "application": {"id": str(app.id), "status": app.status} if app else None,
     }
     if rec is None:
+        out["needs_job_details"] = needs_details
+        return out
+    current_hash = hashlib.sha256((job.description or "").encode()).hexdigest()
+    jd_stale = rec.jd_hash != current_hash
+    if needs_details:
+        out["needs_job_details"] = True
+        out["stale"] = True
+        out["jd_stale"] = jd_stale
         return out
     reqs = (rec.analysis or {}).get("requirements") or []
     ev = {e["requirement_id"]: e for e in (rec.evidence or [])}
@@ -92,7 +110,9 @@ def job_workspace(job_id: str, db: Session = Depends(get_db)):
         for r in reqs
     ]
     out["match"] = rec.match
-    out["stale"] = rec.evidence is None or rec.profile_version != F.profile_version(db)
+    out["jd_stale"] = jd_stale
+    out["stale"] = rec.evidence is None or rec.profile_version != F.profile_version(db) or jd_stale
+    out["needs_job_details"] = False
     if rec.evidence is not None:
         text, refs = current_resume_context(db, job.id)
         out["gaps"] = M.gaps(reqs, rec.evidence, text, refs)

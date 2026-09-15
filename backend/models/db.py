@@ -150,11 +150,17 @@ class Job(Base):
     company = Column(String, nullable=True)
     title = Column(String, nullable=True)
     url = Column(String, nullable=True)
+    source_url = Column(String, nullable=True)
+    canonical_url = Column(String, nullable=True)
+    apply_url = Column(String, nullable=True)
     source = Column(String, nullable=True)  # jobspy_linkedin | jobspy_indeed | etc.
     # SET NULL so deleting a search never orphans a stored job. No Alembic, so the
     # delete handlers null this column themselves on existing databases.
     search_id = Column(UUID(as_uuid=True), ForeignKey("searches.id", ondelete="SET NULL"), nullable=True)
     description = Column(Text, nullable=True)
+    description_source = Column(String, nullable=True)
+    description_quality = Column(Integer, nullable=True)
+    description_fetched_at = Column(DateTime(timezone=True), nullable=True)
     location = Column(String, nullable=True)   # as the board wrote it; never rewritten
     # Parsed out of `location` for territorial search. `loc_city` holds the folded
     # ascii form ("quebec"), so a filter matches regardless of accent or case.
@@ -172,7 +178,12 @@ class Job(Base):
     remote = Column(Boolean, nullable=True)
     salary_min = Column(Integer, nullable=True)
     salary_max = Column(Integer, nullable=True)
-    salary_source = Column(String, nullable=True)  # posting | lca_estimate | unknown
+    salary_source = Column(String, nullable=True)  # posting_ats | posting_description | jobspy_posting | lca_estimate | unknown
+    salary_currency = Column(String(3), nullable=True)
+    salary_period = Column(String, nullable=True)
+    employment_type = Column(String, nullable=True)
+    published_at = Column(DateTime(timezone=True), nullable=True)
+    enrichment_sources = Column(JSON, nullable=True)
     h1b_company_lca_count = Column(Integer, nullable=True)
     h1b_company_approval_rate = Column(Float, nullable=True)
     h1b_jd_flag = Column(Boolean, default=False)

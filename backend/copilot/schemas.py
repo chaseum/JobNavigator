@@ -19,6 +19,7 @@ ClaimStatus = Literal["SUPPORTED", "AMBIGUOUS", "UNSUPPORTED"]
 class JobRequirement(BaseModel):
     id: str = ""
     text: str = Field(min_length=1)
+    source_quote: str = Field(min_length=12, max_length=500)
     category: RequirementCategory
     required: bool
     importance: int = Field(2, ge=1, le=3)

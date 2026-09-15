@@ -788,42 +788,52 @@ async def tailor_resume(body: dict, db: Session = Depends(get_db)):
         )
 
 
-def _persist_job_description(job_id, description: str) -> None:
-    """Write a freshly fetched JD back to the job in its own short session."""
+def _persist_job_enrichment(job_id, enriched) -> None:
+    """Write improved employer data in a short session after network I/O completes."""
     db = SessionLocal()
     try:
         job = db.query(Job).filter(Job.id == job_id).first()
         if job:
-            job.description = description
+            from backend.scraper.enrichment import apply_enrichment
+            apply_enrichment(job, enriched)
             db.commit()
     except Exception as e:
         db.rollback()
-        logger.warning(f"Could not persist fetched description for job {job_id}: {e}")
+        logger.warning(f"Could not persist enriched posting for job {job_id}: {e}")
     finally:
         db.close()
 
 
 async def _resolve_tailoring_jd(job, db=None) -> str:
-    """Resolve the JD text to tailor against, best-quality first: job.description, then a live fetch persisted back to job.description, then the noisier job.cached_page_text as a last resort; returns "" when nothing usable exists.
+    """Return only a quality-checked JD, refreshing weak or unproven stored text first.
 
-    `job` may be a detached snapshot: with db=None the fetched text is persisted
-    through a short session of its own, so no connection is held across the
-    fetch. Callers that already own a session pass it and keep the old
-    "caller commits" behaviour.
+    The fetched description and its provenance are persisted after network I/O.
+    Cached page text is considered only as a quality-checked final fallback.
     """
-    if (job.description or "").strip():
-        return job.description
-    if (job.url or "").strip():
-        from backend.scraper.ats._descriptions import _fetch_job_description
-        fetched = await _fetch_job_description(job.url)
-        if fetched and fetched.strip():
-            job.description = fetched
-            if db is not None:
+    from backend.scraper.enrichment import EnrichedJob, apply_enrichment, enrich_job, validate_job_description
+    enriched = await enrich_job(job)
+    if enriched.description:
+        changed = apply_enrichment(job, enriched)
+        if changed and db is not None:
+            db.commit()
+        elif changed and getattr(job, "id", None):
+            _persist_job_enrichment(job.id, enriched)
+        return enriched.description
+
+    cached = (getattr(job, "cached_page_text", None) or "").strip()
+    if cached:
+        quality = validate_job_description(job, cached, "generic_html")
+        if quality.valid:
+            fallback = EnrichedJob(description=cached, description_source="generic_html",
+                                   description_quality=quality.score,
+                                   field_sources={"description": "generic_html"})
+            changed = apply_enrichment(job, fallback)
+            if changed and db is not None:
                 db.commit()
-            else:
-                _persist_job_description(job.id, fetched)
-            return fetched
-    return job.cached_page_text or ""
+            elif changed and getattr(job, "id", None):
+                _persist_job_enrichment(job.id, fallback)
+            return cached
+    return ""
 
 
 async def _tailor_impl(base_resume_id: str, job_id: str | None, job_description_override: str | None):

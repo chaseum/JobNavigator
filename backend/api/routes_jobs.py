@@ -1,5 +1,6 @@
 """Job listing and management endpoints."""
 import logging
+import hashlib
 import re
 from datetime import timedelta
 from typing import Annotated, Optional
@@ -221,7 +222,7 @@ def list_jobs(
             tailored_resume_id=tailored_map.get(j.id),
             in_flight=in_flight_map.get(str(j.id), []),
             in_flight_detail=in_flight_detail_map.get(str(j.id), []),
-            role_match=_role_match_summary(analyses[j.id], version) if j.id in analyses else None,
+            role_match=_role_match_summary(analyses[j.id], version, j) if j.id in analyses else None,
         )
         for j in jobs
     ]
@@ -298,7 +299,7 @@ def _match_score_col():
             .correlate(Job).scalar_subquery())
 
 
-def _role_match_summary(rec, version) -> dict:
+def _role_match_summary(rec, version, job=None) -> dict:
     """The feed card's slice of a job's latest Role Match: score, rationale and the analysis fields it shows."""
     a, m = rec.analysis or {}, rec.match or {}
     status = {e.get("requirement_id"): e.get("status") for e in rec.evidence or []}
@@ -307,17 +308,26 @@ def _role_match_summary(rec, version) -> dict:
     def texts(*wanted):
         return [r.get("text") for r in reqs if status.get(r.get("id")) in wanted][:3]
 
+    jd_stale = bool(job and rec.jd_hash != hashlib.sha256((job.description or "").encode()).hexdigest())
+    needs_details = bool(job and not _job_description_is_valid(job))
     return {
-        "score": m.get("score"),
+        "score": None if needs_details else m.get("score"),
         "counts": m.get("counts"),
         "hard_blockers": len(m.get("hard_blockers") or []),
-        "stale": rec.evidence is None or rec.profile_version != version,
+        "stale": rec.evidence is None or rec.profile_version != version or jd_stale,
+        "needs_job_details": needs_details,
+        "jd_stale": jd_stale,
         "matched": texts("MATCHED"),
         "missing": texts("MISSING", "UNKNOWN"),
         "employment_type": a.get("employment_type") or None,
         "experience_level": a.get("experience_level") or None,
         "years_required": _years_required(a),
     }
+
+
+def _job_description_is_valid(job) -> bool:
+    from backend.scraper.enrichment import validate_job_description
+    return validate_job_description(job, job.description, job.description_source).valid
 
 
 # The long text fields a `brief=1` listing leaves out.
@@ -1356,10 +1366,16 @@ def _job_to_dict(j: Job, tailored_resume_id=None, in_flight: list[str] | None = 
         "external_id": j.external_id,
         "company": j.company,
         "title": j.title,
-        "url": j.url,
+        "url": j.apply_url or j.canonical_url or j.url,
+        "source_url": j.source_url,
+        "canonical_url": j.canonical_url,
+        "apply_url": j.apply_url,
         "source": j.source,
         "search_id": str(j.search_id) if j.search_id else None,
         "description": j.description,
+        "description_source": j.description_source,
+        "description_quality": j.description_quality,
+        "needs_job_details": not _job_description_is_valid(j),
         "location": j.location,
         "remote": j.remote,
         # The set, so the feed can show every arrangement a posting offers.
@@ -1369,6 +1385,10 @@ def _job_to_dict(j: Job, tailored_resume_id=None, in_flight: list[str] | None = 
         "salary_min": j.salary_min,
         "salary_max": j.salary_max,
         "salary_source": j.salary_source,
+        "salary_currency": j.salary_currency,
+        "salary_period": j.salary_period,
+        "employment_type": j.employment_type,
+        "published_at": j.published_at.isoformat() if j.published_at else None,
         "h1b_company_lca_count": j.h1b_company_lca_count,
         "h1b_company_approval_rate": j.h1b_company_approval_rate,
         "h1b_jd_flag": j.h1b_jd_flag,

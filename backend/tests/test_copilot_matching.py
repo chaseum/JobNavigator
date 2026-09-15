@@ -149,7 +149,12 @@ async def test_analysis_and_match_persist_and_render_the_requirement_matrix(api_
     test_db.add(Persona(id=1, contact={}, work_auth={"authorized_us": True, "requires_sponsorship_now": False,
                                                     "requires_sponsorship_future": False}, preferences={}))
     job = Job(external_id="x1", company="Acme", title="Data Engineer", url="https://acme.test/1",
-              description="We need Python and Kubernetes. Must be authorized to work in the US.")
+              description="""Data Engineer builds reliable data services for product teams and customers.
+Responsibilities include designing, implementing, testing, and operating scalable pipelines.
+The team needs Python for production data processing and Python and Kubernetes experience.
+Must be authorized to work in the US. Engineers communicate clearly and document decisions.
+The full-time role works across analytics, infrastructure, security, and application teams.
+Candidates maintain reliable systems, review code, and improve service quality over time.""")
     test_db.add(job)
     proj = CandidateFact(kind="project", data={"name": "EEG pipeline", "technologies": ["Python"]}, verified=True)
     unverified = CandidateFact(kind="project", data={"name": "K8s homelab"}, verified=False)
@@ -160,10 +165,10 @@ async def test_analysis_and_match_persist_and_render_the_requirement_matrix(api_
     async def fake_structured(schema, prompt, system, **kw):
         if schema is JobAnalysis:
             return JobAnalysis(company="Acme", title="Data Engineer", requirements=[
-                {"text": "Python", "category": "technology", "required": True, "importance": 3},
-                {"text": "python", "category": "technology", "required": True},  # duplicate, dropped
-                {"text": "Kubernetes", "category": "technology", "required": True},
-                {"text": "Authorized to work in the US", "category": "work_authorization", "required": True},
+                {"text": "Python", "source_quote": "The team needs Python for production data processing", "category": "technology", "required": True, "importance": 3},
+                {"text": "python", "source_quote": "The team needs Python for production data processing", "category": "technology", "required": True},  # duplicate, dropped
+                {"text": "Kubernetes", "source_quote": "Python and Kubernetes experience", "category": "technology", "required": True},
+                {"text": "Authorized to work in the US", "source_quote": "Must be authorized to work in the US", "category": "work_authorization", "required": True},
             ]), "ollama", "m"
         assert unverified_ref not in prompt, "unverified facts must never reach the matcher"
         return EvidenceMapping(matches=[

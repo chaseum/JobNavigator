@@ -23,6 +23,7 @@ EXTRACT_PROMPT = """Analyze this job posting. Fill every field from the posting 
 
 For `requirements`, list each distinct requirement once:
 - text: the requirement as written, lightly normalized ("3+ years of Python")
+- source_quote: REQUIRED. Copy an exact 12–500 character quote from the posting that supports this requirement; never paraphrase it. Omit the requirement if no exact supporting quote exists.
 - category: qualification | technology | domain | responsibility | education | experience | work_authorization | clearance | soft_skill
 - required: true for required / must / minimum; false for preferred / nice to have / bonus
 - importance: 3 when repeated or emphasized, 2 normally, 1 for a passing mention
@@ -65,10 +66,32 @@ def weights(db) -> dict:
         return {}
 
 
-def normalize_requirements(analysis: dict) -> dict:
-    """Stable ids r1..rn in posting order, duplicates (same text, case-insensitive) dropped."""
+_QUOTE_STOPWORDS = {"a", "an", "and", "as", "at", "be", "by", "for", "from", "in", "into", "of", "on", "or", "the", "to", "using", "with"}
+
+
+def _quote_normalize(value: str) -> str:
+    import re
+    return " ".join(re.findall(r"[a-z0-9]+", (value or "").casefold()))
+
+
+def _grounded_requirement(requirement: dict, jd: str) -> bool:
+    quote = str(requirement.get("source_quote") or "").strip()
+    quote_text = _quote_normalize(quote)
+    jd_text = _quote_normalize(jd)
+    if len(quote) < 12 or len(quote) > 500 or not quote_text or quote_text not in jd_text:
+        return False
+    required_tokens = {t for t in _quote_normalize(str(requirement.get("text") or "")).split()
+                       if t not in _QUOTE_STOPWORDS and len(t) > 1}
+    quote_tokens = set(quote_text.split())
+    return bool(required_tokens and len(required_tokens & quote_tokens) / len(required_tokens) >= 0.5)
+
+
+def normalize_requirements(analysis: dict, jd: str | None = None) -> dict:
+    """Assign stable ids, drop duplicates, and optionally reject unsupported claims."""
     seen, reqs = set(), []
     for r in analysis.get("requirements") or []:
+        if jd is not None and not _grounded_requirement(r, jd):
+            continue
         key = " ".join(str(r.get("text") or "").lower().split())
         if not key or key in seen:
             continue
@@ -96,18 +119,29 @@ async def run_analysis(job_id: str) -> str:
         job = db.query(Job).filter(Job.id == job_id).first()
         if not job:
             raise RuntimeError("job not found")
-        ref = SimpleNamespace(id=job.id, description=job.description, url=job.url, cached_page_text=job.cached_page_text)
+        ref = SimpleNamespace(
+            id=job.id, description=job.description, description_source=job.description_source,
+            description_quality=job.description_quality, description_fetched_at=job.description_fetched_at,
+            source=job.source, source_url=job.source_url, canonical_url=job.canonical_url,
+            apply_url=job.apply_url, company=job.company, title=job.title, url=job.url,
+            location=job.location, employment_type=job.employment_type,
+            salary_min=job.salary_min, salary_max=job.salary_max, salary_source=job.salary_source,
+            salary_currency=job.salary_currency, salary_period=job.salary_period,
+            cached_page_text=job.cached_page_text,
+        )
         label = f"{job.company or '?'} — {job.title or '?'}"
     finally:
         db.close()
 
     jd = await _resolve_tailoring_jd(ref)
     if not (jd or "").strip():
-        raise RuntimeError("this job has no description to analyze")
+        raise RuntimeError("Could not retrieve a complete job description")
     result, provider, model = await call_structured(
         JobAnalysis, EXTRACT_PROMPT.replace("<<JD>>", jd[:15000]), EXTRACT_SYSTEM,
         feature="copilot", max_tokens=6000, job_id=job_id)
-    data = normalize_requirements(result.model_dump())
+    data = normalize_requirements(result.model_dump(), jd=jd)
+    if not data["requirements"]:
+        raise RuntimeError("Could not extract grounded job requirements from the posting")
 
     db = SessionLocal()
     try:

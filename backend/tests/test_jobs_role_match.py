@@ -1,4 +1,5 @@
 """GET /jobs carries each job's latest Role Match; the Role Match filters, since_days and sort_by=match use it."""
+import hashlib
 from datetime import timedelta
 
 from backend.models.db import JobAnalysisRecord, utcnow
@@ -11,8 +12,16 @@ REQS = [
 
 
 def _analyze(db, job, score, level="Entry level", years="2+ years of Python"):
+    if not job.description:
+        job.description = """Software Engineer builds reliable services for customers and product teams.
+        Responsibilities include designing and operating systems with Python and Kubernetes.
+        Qualifications include collaborating across teams, reviewing code, and documenting decisions.
+        This role supports cloud infrastructure, APIs, data pipelines, and application reliability.
+        Engineers work with customers to understand needs and improve the platform over time."""
+        db.commit()
     db.add(JobAnalysisRecord(
         job_id=job.id,
+        jd_hash=hashlib.sha256(job.description.encode()).hexdigest(),
         analysis={"requirements": REQS, "experience_level": level, "employment_type": "Full-time",
                   "experience_requirements": [years]},
         evidence=[{"requirement_id": "r1", "status": "MATCHED", "source_fact_ids": ["project_1"]},

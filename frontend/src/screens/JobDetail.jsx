@@ -204,6 +204,7 @@ function ReqLine({ r, ok }) {
       <span aria-hidden="true" style={{ flex: '0 0 14px', color: mark[1], fontWeight: 'var(--weight-semibold)' }}>{mark[0]}</span>
       <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
         <span style={{ fontSize: 'var(--t-13)' }}>{r.text}{!r.required && <Helper size="xs"> · preferred</Helper>}</span>
+        {r.source_quote && <Helper>Posting: “{r.source_quote}”</Helper>}
         {note && <Helper>{note}</Helper>}
       </div>
     </div>
@@ -213,10 +214,10 @@ function ReqLine({ r, ok }) {
 function Overview({ ws, job, busy, onAnalyze, onRematch, goEvidence, profile }) {
   if (!ws.analysis) {
     return (
-      <Notice tone="quiet" glyph="○" action={job?.description || ws.job.url ? <Button size="sm" busy={busy} onClick={onAnalyze}>Analyze job</Button> : null}>
-        <strong style={{ fontSize: 'var(--t-13)' }}>Not analyzed yet</strong>
+      <Notice tone={ws.needs_job_details ? 'warn' : 'quiet'} glyph="○" action={job?.description || ws.job.url ? <Button size="sm" busy={busy} onClick={onAnalyze}>{ws.needs_job_details ? 'Get job details' : 'Analyze job'}</Button> : null}>
+        <strong style={{ fontSize: 'var(--t-13)' }}>{ws.needs_job_details ? 'Needs job details' : 'Not analyzed yet'}</strong>
         <Helper>
-          {ws.job.has_description || ws.job.url ? 'Analyze this posting to extract its requirements and check each one against your verified profile.' : 'This job has no description or URL to analyze.'}
+          {ws.needs_job_details ? 'Could not verify a complete job description yet. Retrieve the employer posting before analyzing requirements.' : ws.job.has_description || ws.job.url ? 'Analyze this posting to extract its requirements and check each one against your verified profile.' : 'This job has no description or URL to analyze.'}
           {profile && profile.facts.filter((f) => f.verified).length === 0 && <> Your <RouterLink to="/profile">profile</RouterLink> has no verified facts yet, so nothing can match.</>}
         </Helper>
       </Notice>
@@ -239,7 +240,7 @@ function Overview({ ws, job, busy, onAnalyze, onRematch, goEvidence, profile }) 
               {c.PARTIAL ? <>, <strong>{c.PARTIAL}</strong> partially</> : null}.
               {' '}{(c.MISSING || 0) + (c.UNKNOWN || 0) === 1 ? '1 has' : `${(c.MISSING || 0) + (c.UNKNOWN || 0)} have`} no evidence.
             </span>
-            {ws.stale && <Notice tone="warn" action={<Button size="sm" variant="secondary" busy={busy} onClick={onRematch}>Re-match</Button>}><Helper>Your profile changed since this match was computed.</Helper></Notice>}
+            {ws.stale && <Notice tone="warn" action={<Button size="sm" variant="secondary" busy={busy} onClick={ws.jd_stale ? onAnalyze : onRematch}>{ws.jd_stale ? 'Re-analyze' : 'Re-match'}</Button>}><Helper>{ws.jd_stale ? 'The job description changed since this analysis.' : 'Your profile changed since this match was computed.'}</Helper></Notice>}
             {m.hard_blockers?.length > 0 && (
               <Notice tone="bad">
                 <strong style={{ fontSize: 'var(--t-13)' }}>Hard requirements you do not meet</strong>
@@ -260,9 +261,9 @@ function Overview({ ws, job, busy, onAnalyze, onRematch, goEvidence, profile }) 
         </div>
       )}
       <Section title="Job description" right={ws.job.url ? <Button size="xs" variant="secondary" href={ws.job.url} target="_blank">Posting ↗</Button> : null}>
-        {job?.description
+        {job?.description && !ws.job.needs_job_details
           ? <div style={{ fontSize: 'var(--t-13)', lineHeight: '21px', whiteSpace: 'pre-wrap', maxWidth: '80ch', color: 'var(--text-2)' }}>{job.description}</div>
-          : <Helper>{job ? 'No description stored for this job.' : 'Loading…'}</Helper>}
+          : <Helper>{job ? ws.job.needs_job_details ? 'Needs job details. Generic careers-page text was rejected.' : 'No description stored for this job.' : 'Loading…'}</Helper>}
       </Section>
     </>
   )
@@ -643,7 +644,8 @@ export default function JobDetail() {
     ws.job.location,
     job && ARRANGEMENTS.filter(([k]) => job[`arr_${k}`]).map(([, l]) => l).join(' / '),
     cap(a.employment_type), cap(a.experience_level),
-    job && fmtSalary(job.salary_min, job.salary_max),
+    job && [fmtSalary(job.salary_min, job.salary_max, job.salary_currency, job.salary_period, job.salary_source),
+      job.salary_source === 'lca_estimate' ? 'H-1B filing estimate' : ['posting_ats', 'posting_description'].includes(job.salary_source) ? 'posting' : null].filter(Boolean).join(' · '),
     job?.discovered_at && `found ${ago(job.discovered_at)}`,
   ].filter(Boolean)
 
@@ -668,9 +670,9 @@ export default function JobDetail() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
               <Label>Role Match</Label>
               <span style={{ fontSize: 'var(--t-14)', fontWeight: 'var(--weight-semibold)', color: score != null ? `var(--${tone})` : 'var(--muted)' }}>
-                {score != null ? MATCH_LABEL[tone] : ws.analysis ? 'Not matched' : 'Not analyzed'}
+                {score != null ? MATCH_LABEL[tone] : ws.needs_job_details ? 'Needs job details' : ws.analysis ? 'Not matched' : 'Not analyzed'}
               </span>
-              {ws.stale && score != null && <Helper size="xs">stale · profile changed</Helper>}
+              {ws.stale && score != null && <Helper size="xs">stale · {ws.jd_stale ? 'job details changed' : 'profile changed'}</Helper>}
             </div>
           </div>
         </div>

@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import math
 import re
 import time
 from contextlib import contextmanager
@@ -18,14 +19,41 @@ logger = logging.getLogger("jobnavigator.scraper.sources.jobspy")
 
 def _clean(v):
     """Null-safe scalar → clean string, or None when empty; a bare str(cell) on a pandas NaN yields the literal text 'nan', which passes emptiness checks downstream and broke resume tailoring."""
-    import pandas as pd
+    if v is None:
+        return None
     try:
-        if v is None or pd.isna(v):
+        if math.isnan(v):
             return None
     except (TypeError, ValueError):
         pass  # non-scalar (list/array) — fall through and stringify
     s = str(v).strip()
-    return s or None
+    return None if not s or s.casefold() in {"nan", "none", "<na>", "nat"} else s
+
+
+def _row_urls(row) -> tuple[str | None, str | None, str | None]:
+    """(apply_url, source_url, canonical_url), preserving the original board URL."""
+    source_url = _clean(row.get("job_url"))
+    canonical_url = _clean(row.get("job_url_direct"))
+    return canonical_url or source_url, source_url, canonical_url
+
+
+def _row_salary(row) -> dict:
+    """Keep JobSpy amounts in the returned currency and interval; do not annualize implicitly."""
+    values = {}
+    for key, field in (("salary_min", "min_amount"), ("salary_max", "max_amount")):
+        raw = _clean(row.get(field))
+        if raw:
+            try:
+                values[key] = round(float(raw))
+            except (ValueError, TypeError):
+                pass
+    if not values:
+        return {}
+    origin = (_clean(row.get("salary_source")) or "").lower()
+    values["salary_source"] = "jobspy_description" if origin == "description" else "jobspy_posting"
+    values["salary_currency"] = _clean(row.get("currency"))
+    values["salary_period"] = _clean(row.get("interval"))
+    return values
 
 
 def _apply_h1b_inline(job, db=None, company_lookup=None, phrases=None, loop=None) -> None:
@@ -291,8 +319,10 @@ def _run_sync(search, proxy_url: str = None) -> dict:
             for _, row in jobs_df.iterrows():
                 company = _clean(row.get("company")) or ""
                 title = _clean(row.get("title")) or ""
-                url = _clean(row.get("job_url")) or ""
-                ext_id = make_external_id(company, title, url)
+                url, source_url, canonical_url = _row_urls(row)
+                url = url or ""
+                source_url = source_url or ""
+                ext_id = make_external_id(company, title, source_url)
 
                 if ext_id in existing_ids:
                     continue
@@ -314,9 +344,12 @@ def _run_sync(search, proxy_url: str = None) -> dict:
                     company=company,
                     title=title,
                     url=url,
+                    source_url=source_url,
+                    canonical_url=canonical_url,
                     source=source,
                     search_id=search.id,
                     description=_clean(row.get("description")),
+                    description_source="jobspy_posting" if _clean(row.get("description")) else None,
                     location=_clean(row.get("location")),
                     # JobSpy's own `is_remote` is a substring test over the whole
                     # description, so "remote state" (Terraform) and "remote dev
@@ -330,20 +363,8 @@ def _run_sync(search, proxy_url: str = None) -> dict:
                 )
 
                 # Extract salary if present in JobSpy results
-                min_amount = row.get("min_amount")
-                max_amount = row.get("max_amount")
-                if min_amount and str(min_amount) != "nan":
-                    try:
-                        job.salary_min = int(float(min_amount))
-                        job.salary_source = "posting"
-                    except (ValueError, TypeError):
-                        pass
-                if max_amount and str(max_amount) != "nan":
-                    try:
-                        job.salary_max = int(float(max_amount))
-                        job.salary_source = "posting"
-                    except (ValueError, TypeError):
-                        pass
+                for key, value in _row_salary(row).items():
+                    setattr(job, key, value)
 
                 # H-1B check + salary extraction inline, using the shared loop/lookup/phrases hoisted above.
                 _apply_h1b_inline(job, db, company_lookup=company_lookup, phrases=phrases, loop=h1b_loop)
@@ -384,8 +405,10 @@ def _run_sync(search, proxy_url: str = None) -> dict:
                 for _, row in rejected_df.iterrows():
                     company = _clean(row.get("company")) or ""
                     title = _clean(row.get("title")) or ""
-                    url = _clean(row.get("job_url")) or ""
-                    ext_id = make_external_id(company, title, url)
+                    url, source_url, canonical_url = _row_urls(row)
+                    url = url or ""
+                    source_url = source_url or ""
+                    ext_id = make_external_id(company, title, source_url)
 
                     if ext_id in existing_ids:
                         continue
@@ -404,9 +427,12 @@ def _run_sync(search, proxy_url: str = None) -> dict:
                         company=company,
                         title=title,
                         url=url,
+                        source_url=source_url,
+                        canonical_url=canonical_url,
                         source=source,
                         search_id=search.id,
                         description=_clean(row.get("description")),
+                        description_source="jobspy_posting" if _clean(row.get("description")) else None,
                         location=_clean(row.get("location")),
                         status="ignored",
                         seen=False,
