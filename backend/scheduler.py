@@ -43,6 +43,7 @@ def configure_scheduler():
     db = SessionLocal()
     try:
         scrape_interval = _int_setting(db, "scrape_interval_minutes")
+        discovery_interval = _int_setting(db, "discovery_interval_minutes")
         email_interval = _int_setting(db, "email_check_interval_minutes")
         backup_cron = str(get_setting(db, "backup_cron", "") or "").strip()
         digest_cron = str(get_setting(db, "digest_cron", "") or "").strip()
@@ -81,6 +82,18 @@ def configure_scheduler():
             replace_existing=True,
         )
 
+    # Automatic discovery. The user states preferences; this keeps the feed fresh
+    # from them without anyone pressing Run. It is the SAME scheduler as every
+    # other periodic job, deliberately — a second one would be a second thing to
+    # debug at 3am for no gain.
+    if discovery_interval > 0:
+        scheduler.add_job(
+            run_discovery_cycle,
+            IntervalTrigger(minutes=discovery_interval),
+            id="discovery",
+            replace_existing=True,
+        )
+
     if email_interval > 0:
         scheduler.add_job(
             run_email_check,
@@ -97,7 +110,8 @@ def configure_scheduler():
     _add_cron_job(run_auto_reject, "auto_reject", reject_cron)
 
     logger.info(
-        f"Scheduler configured: scrape every {scrape_interval}m, "
+        f"Scheduler configured: discovery every {discovery_interval}m, "
+        f"scrape every {scrape_interval}m, "
         f"email every {email_interval}m, {len(scheduler.get_jobs())} total jobs"
     )
 
@@ -174,11 +188,26 @@ async def run_all_scrapes():
             # Also score any saved-but-unscored jobs (from manual saves)
             from backend.analyzer.cv_scorer import analyze_unscored_jobs
             await analyze_unscored_jobs(status="saved")
+            # Postings a company or search scrape just stored go through exactly
+            # the same Preference Gate and Candidate Fit queue as anything
+            # discovery found — one pipeline, one set of rules.
+            from backend.discovery.engine import post_collection
+            post_collection()
             await check_scrape_health()
             run.summary = _scrape_summary(started)
     except JobAlreadyRunningError as e:
         logger.warning(f"Scheduler skipped: {e}")
 
+
+async def run_discovery_cycle():
+    """Rebuild the Discovery Plan from the current preferences and execute it."""
+    from backend.job_monitor import tracked_run, JobAlreadyRunningError
+    try:
+        async with tracked_run("discovery", "scheduler") as run:
+            from backend.discovery.engine import run_discovery
+            run.summary = await run_discovery()
+    except JobAlreadyRunningError as e:
+        logger.warning(f"Scheduler skipped: {e}")
 
 async def run_email_check():
     from backend.job_monitor import tracked_run, JobAlreadyRunningError

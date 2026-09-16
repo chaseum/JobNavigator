@@ -48,13 +48,15 @@ def test_role_match_summary_filters_and_sort(client, test_db):
     def titles(q):
         return {r["title"] for r in client.get(f"/api/jobs?{q}").json()["jobs"]}
     assert titles("min_match=50") == {"Hi"}
-    assert titles("level=senior") == {"Lo"}
-    assert titles("max_years=3") == {"Hi"}
+    # `level` and `max_years` moved to the DERIVED metadata columns
+    # (backend/discovery) and are covered by test_jobs_derived_filters.py. What
+    # is still analysis-backed is the score and the employment type.
+    assert titles("employment_type=full-time") == {"Hi", "Lo"}
 
     facets = client.get("/api/jobs/facets").json()
-    assert {x["name"]: x["count"] for x in facets["levels"]} == {"entry level": 1, "senior": 1}
-    # a level count still narrows by the OTHER Role Match filters
-    assert client.get("/api/jobs/facets?min_match=50").json()["levels"] == [{"name": "entry level", "count": 1}]
+    assert {x["name"]: x["count"] for x in facets["employment_types"]} == {"full-time": 2}
+    # an employment-type count still narrows by the OTHER Role Match filters
+    assert client.get("/api/jobs/facets?min_match=50").json()["employment_types"] == [{"name": "full-time", "count": 1}]
 
 
 def test_since_days_uses_discovery_time(client, test_db):

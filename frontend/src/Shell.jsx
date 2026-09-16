@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import { Link, Outlet, useLocation } from 'react-router-dom'
 import {
-  Briefcase, FileText, Send, IdCard, Settings as SettingsIcon, LayoutDashboard, Search, Building2,
+  Briefcase, FileText, Send, IdCard, Settings as SettingsIcon, LayoutDashboard,
   Mail, MessageSquareText, Fingerprint, ChartLine,
 } from 'lucide-react'
 import api from './api'
@@ -16,8 +16,12 @@ const PRIMARY = [
   ['/feed', 'Jobs', Briefcase], ['/resumes', 'Resume', FileText], ['/applications', 'Applications', Send],
   ['/profile', 'Career Evidence', IdCard], ['/settings', 'Settings', SettingsIcon],
 ]
+// Searches and Companies are gone from here on purpose. Both are scraper
+// configuration: discovery builds its own queries from your Job Preferences and
+// resolves company career sources on its own, so neither is needed to receive
+// jobs. They are still reachable, whole, from Settings → Advanced · Developer.
 const MORE = [
-  ['/dashboard', 'Dashboard', LayoutDashboard], ['/searches', 'Searches', Search], ['/companies', 'Companies', Building2],
+  ['/dashboard', 'Dashboard', LayoutDashboard],
   ['/cover-letters', 'Cover letters', Mail], ['/answer-bank', 'Answer bank', MessageSquareText],
   ['/persona', 'Persona', Fingerprint], ['/stats', 'Stats', ChartLine],
 ]

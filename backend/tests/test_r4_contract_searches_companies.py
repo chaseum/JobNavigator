@@ -33,7 +33,10 @@ def test_create_search_applies_every_documented_default(client):
     body = r.json()
     assert body["search_mode"] == "keyword"
     assert body["active"] is True
-    assert body["title_exclude_keywords"] == ["intern", "junior", "associate"]
+    # No default seniority exclusion: "intern, junior, associate" used to delete the
+    # whole early-career feed before anything could score it. Seniority is a user
+    # criterion the Preference Gate decides (backend/discovery/gate.py).
+    assert body["title_exclude_keywords"] == []
 
 
 def test_create_search_drops_unknown_fields(client):

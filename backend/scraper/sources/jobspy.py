@@ -307,10 +307,15 @@ def _run_sync(search, proxy_url: str = None) -> dict:
             "location": search.location or "United States",
             "results_wanted": search.results_wanted or 50,
             "hours_old": search.hours_old or 24,
-            "job_type": search.job_type or "fulltime",
-            "country_indeed": "USA",
+            # Boards take ONE employment type. Omitting it means "any", which is
+            # what a preference set naming several of them needs; forcing
+            # "fulltime" here is what used to make a Full-time + Internship
+            # preference return no internships at all.
+            "country_indeed": getattr(search, "country_indeed", None) or "USA",
             "verbose": 2,
         }
+        if search.job_type:
+            kwargs["job_type"] = search.job_type
 
         if search.is_remote is not None:
             kwargs["is_remote"] = search.is_remote

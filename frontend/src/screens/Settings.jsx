@@ -3,6 +3,8 @@ import ConfirmDialog, { PromptDialog } from '../ConfirmDialog'
 import { useEscape, useSettled, useSingleOpen, NBSP } from '../hooks'
 import { Button, FooterRow, GlyphBadge, Heading, HeaderRow, Helper, IconButton, Input, Label, Link, Menu, MenuHead, MenuItem, ModalPanel, Mono, PageTitle, Pill, Select, Spinner, Surface, Switch, Textarea, ToolbarTrigger } from '../ui'
 import { useTheme, MODE_OPTIONS, themeOptions } from '../theme'
+import JobPreferencesForm from './JobPreferences'
+import { useJobPreferences } from '../jobPrefs'
 import { describeCron, whenShort, CRON_PRESETS } from '../time'
 import api from '../api'
 import '../theme.css'
@@ -346,44 +348,27 @@ export default function Settings() {
         { kind: 'theme', label: 'Theme', help: 'The app’s look: colours, fonts and shapes. Saved in this browser.' },
         BT('Classic dashboard', 'Open the previous (v1) interface.', 'Open classic UI', null, { href: '/classic' }),
       ]],
-      ['models', 'AI', 'Models', '', [
+      // The one canonical criteria document. The Jobs toolbar edits exactly this,
+      // so the two screens cannot drift apart — there is no second copy.
+      ['jobprefs', '', 'Job preferences', 'what you want; JobNavigator works out how to find it', [
+        { kind: 'jobprefs', full: true, label: 'What you are looking for',
+          help: 'Job functions, level, location, work model, dates and experience. The same settings as the filters on the Jobs screen.' },
+        SW('Automatic job analysis', 'Jobs that match your preferences are analysed for Candidate Fit on their own.',
+          'Off — jobs arrive unanalysed and you run Candidate Fit per job.', 'auto_analysis_enabled', { dflt: true }),
+        BT('Refresh jobs now', 'Look for new jobs using your current preferences. This normally happens on its own.', 'Refresh',
+          () => api.post('/discovery/refresh')),
+      ]],
+      ['models', 'AI', 'AI processing', 'where job text and your profile are processed', [
         { kind: 'pair', label: 'Primary provider · model', help: 'Every AI feature uses this pair unless overridden below.',
           pKey: 'llm_provider', mKey: 'llm_model',
           info: "Providers: Claude API, Claude Code, Codex CLI (your ChatGPT subscription), OpenAI, Ollama (local), OpenRouter. The model list shows that provider's models, including any you added under Model catalog. OpenRouter covers every vendor with one key but has no prompt-cache discount. The two subscription CLIs are meant for attended use and have plan limits; a limit hit fails over to the fallback without retrying." },
         B('API key', 'API key for the primary provider.', 'llm_api_key', { secret: true, mono: true, w: '340px', hide: () => KEYLESS.includes(val('llm_provider', 'ollama')) }),
         B('Ollama endpoint', 'Where the local Ollama server listens. Empty uses OLLAMA_BASE_URL, else http://localhost:11434.', 'ollama_base_url',
           { mono: true, w: '340px', placeholder: 'http://localhost:11434' }),
-        LLM('Copilot', 'Job analysis, evidence matching, résumé writing and the claim audit (temperature 0, schema-constrained).', 'copilot_llm'),
-        LLM('Scoring', 'Model that scores new jobs against your résumés.', 'scoring_llm'),
-        LLM('Scoring fallback', 'Retries scoring once on error or rate limit — scoring only.', 'llm_fallback',
-          { info: 'Used only when the scoring call fails or is rate-limited. One retry, then the job stays unscored until the next run. Choose a cheap model from a different provider than the primary.' }),
-        LLM('Tailoring', 'Model that rewrites résumé bullets for a posting.', 'cv_tailor_llm'),
-        LLM('Cover letters', 'Model that drafts letters from résumé + posting + Persona.', 'cover_letter_llm'),
-        LLM('Autofill', 'Model that answers application-form questions in the extension.', 'autofill_llm'),
-        LLM('Email classification', 'Model that sorts Gmail replies into application events.', 'email_llm'),
-        { kind: 'models', label: 'Model catalog', help: 'Add new or unlisted models and remove your additions.',
-          info: 'Add models that are not in the built-in list. Search uses the provider’s catalog for OpenRouter, OpenAI and Claude. For Ollama, type the local model name. Removed models stay removed.' },
       ]],
-      ['copilot', '', 'Copilot', '', [
-        BT('Where your data goes', 'Which provider receives job text, profile facts and application answers, per feature.', 'Show', async () => {
-          const { data } = await api.get('/copilot/privacy')
-          await ask({
-            title: data.any_external ? 'Some features send data to an external provider' : 'Everything runs on this machine',
-            body: data.features.map((f) => `${f.label}: ${f.external ? `SENT TO ${f.provider}` : `local (${f.destination})`} — ${f.sends}`).join('\n'),
-            label: 'OK',
-          })
-        }),
-        E('Scoring weights', 'Candidate Fit and Resume Applicability: weight per required / preferred requirement × its importance; soft_skill and responsibility multiply that. Eligibility is never scored.', 'role_match_weights',
-          { json: true, sub: 'JSON: required, preferred, soft_skill, responsibility' }),
-        B('Recommended minimum', 'Candidate Fit at or above which a job reads as recommended.', 'role_match_min_recommended', { int: true, w: '90px' }),
+      ['resume', 'Resume', 'Resume', '', [
         SEL('Résumé template', 'LaTeX template folder under backend/resume/templates.', 'resume_template',
           [['jakes', "Jake's Resume"], ['default', 'Plain single column']], { dflt: 'jakes', w: '240px' }),
-        B('Page target', 'A compiled résumé longer than this is flagged in Parser Health.', 'resume_page_target', { int: true, w: '90px' }),
-        SEL('Projects on tailored résumés', 'Whether tailoring may swap in different projects or only reorder the base ones.', 'resume_project_policy',
-          [['keep', 'Keep the base projects'], ['reorder', 'Reorder the base projects'], ['replace', 'May replace projects']], { dflt: 'reorder', w: '260px' }),
-        SEL('Skill order', 'How the skills section is ordered.', 'resume_skill_ordering',
-          [['relevance', 'Most relevant to the job first'], ['profile', 'Your profile order']], { dflt: 'relevance', w: '260px' }),
-        E('Section order', 'Order of résumé sections.', 'resume_section_order', { json: true, sub: 'JSON list of: education, experience, research, projects, skills, certifications' }),
         SEL('Résumé for jobs with none accepted', 'What autofill uploads when the job has no accepted résumé.', 'autofill_resume_fallback',
           [['none', 'Upload nothing'], ['latest', 'Latest accepted résumé']], { dflt: 'none', w: '260px' }),
         SEL('Overleaf', 'Optional editor destination; the local LaTeX version stays authoritative.', 'overleaf_mode',
@@ -398,27 +383,6 @@ export default function Settings() {
           const { data } = await api.post('/copilot/overleaf/pull')
           flash(`Pulled · ${data.last_commit || 'empty project'}`)
         }, { hide: () => val('overleaf_mode', 'disabled') !== 'git' }),
-      ]],
-      ['scoring', '', 'Scoring behavior', '', [
-        SEL('Default résumé', 'Used when a company has no résumés of its own selected.', 'default_resume_id', resumeOpts, { w: '260px' }),
-        B('Max parallel jobs', 'Extra requests wait in a queue to limit database load.', 'scoring_max_concurrent', { mono: true, int: true, w: '135px' }),
-        SEL('Default depth', 'Used when neither the company nor the search sets its own.', 'scoring_default_depth',
-          [['light', 'Light — score only'], ['full', 'Full — score + keywords + report']], { w: '260px', dflt: 'light',
-            info: 'Light: score and one line, low cost. Full: adds keyword coverage, requirement mapping and a written report. Each company and search can override this.' }),
-        SEL('On save action', 'Score a job when you save it in the Feed, if it has no score yet.', 'on_save_action',
-          [['off', "Off — don't score on save"], ['light', 'Light — score only'], ['full', 'Full — score + keywords + report']], { w: '260px', dflt: 'off' }),
-        SW('Prompt caching', 'Sends the rubric, résumés and schema as a cached block. Repeat calls cost about 10× less.', 'Disabled — full price per call.', 'prompt_caching_enabled',
-          { dflt: true, info: 'Only applies to the Claude API provider. If scores look outdated after you edit the rubric, turn this off, run once, then turn it back on.' }),
-        E('Scoring rubric', 'The instruction block every scoring call starts from.', 'scoring_rubric', { sub: 'keep placeholders like {job_description} as written; they are filled in when the prompt runs' }),
-        E('Light output schema', 'JSON shape for Light runs.', 'scoring_output_light', { sub: 'CV_NAMES_HERE expands to your résumé names' }),
-        E('Full output schema', 'JSON shape for Full runs.', 'scoring_output_full', { sub: 'CV_NAMES_HERE expands to your résumé names' }),
-      ]],
-      ['tailoring', '', 'Tailoring', '', [
-        E('Résumé tailoring prompt', 'Default: rewrites only bullets that the job description makes relevant.', 'cv_tailor_prompt', { sub: 'placeholders: {job_description} {resume_json}' }),
-        E('Persona tailoring prompt', 'Default: uses the Persona résumé content; falls back to the résumé prompt if empty.', 'persona_tailor_prompt', { sub: 'placeholders: {job_description} {persona_json}' }),
-        B('Max parallel tailors', 'Tailoring and cover-letter generation share this limit.', 'tailoring_max_concurrent', { mono: true, int: true, w: '135px' }),
-        SEL('Auto-score after tailoring', 'Scores a tailored résumé as soon as tailoring finishes.', 'tailor_auto_quick_score',
-          [['off', "Off — don't score after tailoring"], ['light', 'Light — score only'], ['full', 'Full — score + keywords + report']], { w: '260px', dflt: 'light' }),
       ]],
       ['letters', '', 'Cover letters', '', [
         SEL('Default voice', 'The list comes from the voice presets below.', 'cover_letter_default_voice', voiceOpts, { w: '260px' }),
@@ -436,34 +400,6 @@ export default function Settings() {
         SEL('Include by default', 'Sections included in the prep handover. The questions are always included.', 'prep_include',
           [['resume,posting,notes', 'Résumé · posting · notes'], ['resume,posting', 'Résumé · posting'],
             ['posting,notes', 'Posting · notes'], ['resume', 'Résumé only'], ['posting', 'Posting only']], { w: '260px', dflt: 'resume,posting,notes' }),
-      ]],
-      ['emailclass', '', 'Email classification', '', [
-        SW('LLM classification', 'Replies are auto-classified into interview / rejection / offer and attached to the right application.', 'Disabled — replies only show as raw snippets.', 'email_llm_enabled'),
-        B('Confidence threshold', '0–100 — below this, the email is flagged for manual review instead.', 'email_llm_confidence_threshold', { mono: true, int: true, w: '135px' }),
-        E('Classification prompt', 'Labels + confidence + application hint.', 'email_llm_prompt', { sub: 'placeholders: {applications} {from} {subject} {body}' }),
-        E('Gmail query · subjects', 'Subject terms the Gmail poll searches for.', 'email_gmail_query_subjects', { list: true, sub: 'one term per line · OR-combined in the Gmail query' }),
-        E('Gmail query · senders', 'Extra sender domains treated as job-related email.', 'email_gmail_query_senders', { list: true, sub: 'one domain per line' }),
-        E('Gmail query · exclusions', 'Ignore newsletters and job-alert email.', 'email_gmail_query_exclusions', { list: true, sub: 'one term per line · appended as -term' }),
-      ]],
-      ['scheduler', 'Pipeline', 'Scheduler', 'intervals in minutes (0 = off) · crons empty = off', [
-        B('Scrape all companies', 'Runs every active company scrape on this interval.', 'scrape_interval_minutes', { mono: true, int: true, w: '135px' }),
-        B('Email check', 'Polls Gmail for replies to your applications.', 'email_check_interval_minutes', { mono: true, int: true, w: '135px' }),
-        B('Cleanup after', 'Days before ignored and skipped job postings are removed.', 'job_archive_after_days', { mono: true, int: true, w: '135px' }),
-        B('Auto-reject threshold', 'Days of silence before an application is auto-moved to Rejected.', 'auto_reject_after_days', { mono: true, int: true, w: '135px',
-          info: 'Counted from the last activity on the application (stage change, email, note). Auto-rejected applications keep their history and stay in Stats.' }),
-        B('Auto-reject · cron', 'Applies the auto-reject threshold.', 'reject_cron', { mono: true, cron: true, w: '135px' }),
-		B('DB backup · cron', 'Database snapshot.', 'backup_cron', { mono: true, cron: true, w: '135px' }),
-        B('Telegram digest · cron', 'Summary of new high-fit jobs.', 'digest_cron', { mono: true, cron: true, w: '135px' }),
-        B('H-1B refresh · cron', 'Re-imports and re-scans the sponsorship dataset.', 'h1b_cron', { mono: true, cron: true, w: '135px' }),
-        B('Job cleanup · cron', 'Purges expired postings.', 'cleanup_cron', { mono: true, cron: true, w: '135px' }),        
-      ]],
-      ['exclude', '', 'Global exclude', '', [
-        E('Body phrases', 'Skip postings whose description contains any of these phrases.', 'body_exclusion_phrases', { list: true, sub: 'one phrase per line · case-insensitive' }),
-        E('Title exclude', 'Skip jobs whose title matches any of these words.', 'title_exclude_global', { list: true, sub: 'one phrase per line · case-insensitive' }),
-        E('Company exclude', 'Skip jobs from these companies (exact name).', 'company_exclude_global', { list: true, sub: 'one company per line · exact match' }),
-      ]],
-      ['dedup', '', 'Dedup tracking params', '', [
-        E('Stripped params', 'Query params removed from job URLs before duplicate detection. All utm_* are always stripped.', 'dedup_tracking_params', { list: true, sub: 'one param per line' }),
       ]],
       ['notifications', 'Integrations', 'Notifications', '', [
         SW('Telegram', 'New high-scoring jobs and the daily digest are sent to your chat. The digest schedule is under Scheduler.', 'Off — no push notifications.', 'telegram_enabled'),
@@ -498,6 +434,102 @@ export default function Settings() {
           [['path', 'Path + random (/cv/a7x2kp)'], ['param', 'Param + random (?cv=a7x2kp)'],
             ['path_jobid', 'Path + job ID (/cv/142li)'], ['param_jobid', 'Param + job ID (?cv=142li)']], { w: '260px', dflt: 'path' }),
       ]],
+      ['privacy', 'Privacy & data', 'Privacy & data', '', [
+        BT('Where your data goes', 'Which provider receives job text, profile facts and application answers, per feature.', 'Show', async () => {
+          const { data } = await api.get('/copilot/privacy')
+          await ask({
+            title: data.any_external ? 'Some features send data to an external provider' : 'Everything runs on this machine',
+            body: data.features.map((f) => `${f.label}: ${f.external ? `SENT TO ${f.provider}` : `local (${f.destination})`} — ${f.sends}`).join('\n'),
+            label: 'OK',
+          })
+        }),
+        BT('DB backup', 'Write a database snapshot now, outside the schedule.', 'Run backup', () => api.post('/db/backup')),
+      ]],
+      // ── Advanced · Developer ────────────────────────────────────────────────
+      // Everything from here down is machinery. A self-hosted install still needs
+      // it, so nothing was deleted — but none of it is a decision a job seeker
+      // should have to make, so none of it sits beside the job criteria any more.
+      ['discovery', 'Advanced · Developer', 'Discovery', 'how the job feed is collected', [
+        BT('Discovery diagnostics', 'The current internal query plan, per-source health, preference-gate rejects and the analysis queue.',
+          'Open', null, { href: '/advanced' }),
+        B('Discovery interval', 'Minutes between automatic discovery runs (0 = off).', 'discovery_interval_minutes', { mono: true, int: true, w: '135px' }),
+        B('Proxy URL', 'Used by collectors that hit rate limits or geo-blocks. Empty = direct.', 'proxy_url', { mono: true, w: '340px', placeholder: 'socks5://127.0.0.1:9050' }),
+        B('Job board timeout', 'Seconds one keyword board may run before its worker process is killed. Each board runs on its own, so a stuck one never strands the rest.', 'jobspy_board_timeout', { int: true, w: '90px' }),
+        BT('Custom searches', 'Hand-written scraper configurations. Not needed — discovery builds its own from your preferences.', 'Open', null, { href: '/searches' }),
+        BT('Company monitors', 'Career pages being watched directly. Discovery adds and resolves these on its own.', 'Open', null, { href: '/companies' }),
+      ]],
+      ['scheduler', '', 'Scheduler', 'intervals in minutes (0 = off) · crons empty = off', [
+        B('Scrape all companies', 'Runs every active company scrape on this interval.', 'scrape_interval_minutes', { mono: true, int: true, w: '135px' }),
+        B('Email check', 'Polls Gmail for replies to your applications.', 'email_check_interval_minutes', { mono: true, int: true, w: '135px' }),
+        B('Cleanup after', 'Days before ignored and skipped job postings are removed.', 'job_archive_after_days', { mono: true, int: true, w: '135px' }),
+        B('Auto-reject threshold', 'Days of silence before an application is auto-moved to Rejected.', 'auto_reject_after_days', { mono: true, int: true, w: '135px',
+          info: 'Counted from the last activity on the application (stage change, email, note). Auto-rejected applications keep their history and stay in Stats.' }),
+        B('Auto-reject · cron', 'Applies the auto-reject threshold.', 'reject_cron', { mono: true, cron: true, w: '135px' }),
+		B('DB backup · cron', 'Database snapshot.', 'backup_cron', { mono: true, cron: true, w: '135px' }),
+        B('Telegram digest · cron', 'Summary of new high-fit jobs.', 'digest_cron', { mono: true, cron: true, w: '135px' }),
+        B('H-1B refresh · cron', 'Re-imports and re-scans the sponsorship dataset.', 'h1b_cron', { mono: true, cron: true, w: '135px' }),
+        B('Job cleanup · cron', 'Purges expired postings.', 'cleanup_cron', { mono: true, cron: true, w: '135px' }),        
+      ]],
+      ['exclude', '', 'Global exclude', '', [
+        E('Body phrases', 'Skip postings whose description contains any of these phrases.', 'body_exclusion_phrases', { list: true, sub: 'one phrase per line · case-insensitive' }),
+        E('Title exclude', 'Skip jobs whose title matches any of these words.', 'title_exclude_global', { list: true, sub: 'one phrase per line · case-insensitive' }),
+        E('Company exclude', 'Skip jobs from these companies (exact name).', 'company_exclude_global', { list: true, sub: 'one company per line · exact match' }),
+      ]],
+      ['dedup', '', 'Dedup tracking params', '', [
+        E('Stripped params', 'Query params removed from job URLs before duplicate detection. All utm_* are always stripped.', 'dedup_tracking_params', { list: true, sub: 'one param per line' }),
+      ]],
+      ['aiinternals', '', 'AI internals', 'per-feature model overrides — empty means “use the primary”', [
+        LLM('Copilot', 'Job analysis, evidence matching, résumé writing and the claim audit (temperature 0, schema-constrained).', 'copilot_llm'),
+        LLM('Scoring', 'Model that scores new jobs against your résumés.', 'scoring_llm'),
+        LLM('Scoring fallback', 'Retries scoring once on error or rate limit — scoring only.', 'llm_fallback',
+          { info: 'Used only when the scoring call fails or is rate-limited. One retry, then the job stays unscored until the next run. Choose a cheap model from a different provider than the primary.' }),
+        LLM('Tailoring', 'Model that rewrites résumé bullets for a posting.', 'cv_tailor_llm'),
+        LLM('Cover letters', 'Model that drafts letters from résumé + posting + Persona.', 'cover_letter_llm'),
+        LLM('Autofill', 'Model that answers application-form questions in the extension.', 'autofill_llm'),
+        LLM('Email classification', 'Model that sorts Gmail replies into application events.', 'email_llm'),
+        { kind: 'models', label: 'Model catalog', help: 'Add new or unlisted models and remove your additions.',
+          info: 'Add models that are not in the built-in list. Search uses the provider’s catalog for OpenRouter, OpenAI and Claude. For Ollama, type the local model name. Removed models stay removed.' },
+      ]],
+      ['scoring', '', 'Scoring behavior', '', [
+        SEL('Default résumé', 'Used when a company has no résumés of its own selected.', 'default_resume_id', resumeOpts, { w: '260px' }),
+        B('Max parallel jobs', 'Extra requests wait in a queue to limit database load.', 'scoring_max_concurrent', { mono: true, int: true, w: '135px' }),
+        SEL('Default depth', 'Used when neither the company nor the search sets its own.', 'scoring_default_depth',
+          [['light', 'Light — score only'], ['full', 'Full — score + keywords + report']], { w: '260px', dflt: 'light',
+            info: 'Light: score and one line, low cost. Full: adds keyword coverage, requirement mapping and a written report. Each company and search can override this.' }),
+        SEL('On save action', 'Score a job when you save it in the Feed, if it has no score yet.', 'on_save_action',
+          [['off', "Off — don't score on save"], ['light', 'Light — score only'], ['full', 'Full — score + keywords + report']], { w: '260px', dflt: 'off' }),
+        SW('Prompt caching', 'Sends the rubric, résumés and schema as a cached block. Repeat calls cost about 10× less.', 'Disabled — full price per call.', 'prompt_caching_enabled',
+          { dflt: true, info: 'Only applies to the Claude API provider. If scores look outdated after you edit the rubric, turn this off, run once, then turn it back on.' }),
+        E('Scoring rubric', 'The instruction block every scoring call starts from.', 'scoring_rubric', { sub: 'keep placeholders like {job_description} as written; they are filled in when the prompt runs' }),
+        E('Light output schema', 'JSON shape for Light runs.', 'scoring_output_light', { sub: 'CV_NAMES_HERE expands to your résumé names' }),
+        E('Full output schema', 'JSON shape for Full runs.', 'scoring_output_full', { sub: 'CV_NAMES_HERE expands to your résumé names' }),
+      ]],
+      ['tailoring', '', 'Tailoring', '', [
+        E('Résumé tailoring prompt', 'Default: rewrites only bullets that the job description makes relevant.', 'cv_tailor_prompt', { sub: 'placeholders: {job_description} {resume_json}' }),
+        E('Persona tailoring prompt', 'Default: uses the Persona résumé content; falls back to the résumé prompt if empty.', 'persona_tailor_prompt', { sub: 'placeholders: {job_description} {persona_json}' }),
+        B('Max parallel tailors', 'Tailoring and cover-letter generation share this limit.', 'tailoring_max_concurrent', { mono: true, int: true, w: '135px' }),
+        SEL('Auto-score after tailoring', 'Scores a tailored résumé as soon as tailoring finishes.', 'tailor_auto_quick_score',
+          [['off', "Off — don't score after tailoring"], ['light', 'Light — score only'], ['full', 'Full — score + keywords + report']], { w: '260px', dflt: 'light' }),
+      ]],
+      ['emailclass', '', 'Email classification', '', [
+        SW('LLM classification', 'Replies are auto-classified into interview / rejection / offer and attached to the right application.', 'Disabled — replies only show as raw snippets.', 'email_llm_enabled'),
+        B('Confidence threshold', '0–100 — below this, the email is flagged for manual review instead.', 'email_llm_confidence_threshold', { mono: true, int: true, w: '135px' }),
+        E('Classification prompt', 'Labels + confidence + application hint.', 'email_llm_prompt', { sub: 'placeholders: {applications} {from} {subject} {body}' }),
+        E('Gmail query · subjects', 'Subject terms the Gmail poll searches for.', 'email_gmail_query_subjects', { list: true, sub: 'one term per line · OR-combined in the Gmail query' }),
+        E('Gmail query · senders', 'Extra sender domains treated as job-related email.', 'email_gmail_query_senders', { list: true, sub: 'one domain per line' }),
+        E('Gmail query · exclusions', 'Ignore newsletters and job-alert email.', 'email_gmail_query_exclusions', { list: true, sub: 'one term per line · appended as -term' }),
+      ]],
+      ['copilotinternals', '', 'Candidate Fit & resume internals', '', [
+        E('Scoring weights', 'Candidate Fit and Resume Applicability: weight per required / preferred requirement × its importance; soft_skill and responsibility multiply that. Eligibility is never scored.', 'role_match_weights',
+          { json: true, sub: 'JSON: required, preferred, soft_skill, responsibility' }),
+        B('Recommended minimum', 'Candidate Fit at or above which a job reads as recommended.', 'role_match_min_recommended', { int: true, w: '90px' }),
+        B('Page target', 'A compiled résumé longer than this is flagged in Parser Health.', 'resume_page_target', { int: true, w: '90px' }),
+        SEL('Projects on tailored résumés', 'Whether tailoring may swap in different projects or only reorder the base ones.', 'resume_project_policy',
+          [['keep', 'Keep the base projects'], ['reorder', 'Reorder the base projects'], ['replace', 'May replace projects']], { dflt: 'reorder', w: '260px' }),
+        SEL('Skill order', 'How the skills section is ordered.', 'resume_skill_ordering',
+          [['relevance', 'Most relevant to the job first'], ['profile', 'Your profile order']], { dflt: 'relevance', w: '260px' }),
+        E('Section order', 'Order of résumé sections.', 'resume_section_order', { json: true, sub: 'JSON list of: education, experience, research, projects, skills, certifications' }),
+      ]],
       ['jobright', '', 'Jobright.ai', '', [
         B('Email', 'Your Jobright account.', 'jobright_email', { w: '260px' }),
         B('Password', 'Stored locally.', 'jobright_password', { secret: true, w: '260px' }),
@@ -515,15 +547,13 @@ export default function Settings() {
           info: 'The extension captures jobs while you browse LinkedIn collections. Use a separate account so rate limits, CAPTCHAs or bans affect it and not your real profile.' }),
         B('Mock account password', 'Stored locally only.', 'linkedin_mock_password', { secret: true, w: '260px' }),
       ]],
-      ['advanced', 'System', 'Advanced', '', [
-        B('Proxy URL', 'Used by scrapes that hit rate limits or geo-blocks. Empty = direct.', 'proxy_url', { mono: true, w: '340px', placeholder: 'socks5://127.0.0.1:9050' }),
-        B('Job board timeout', 'Seconds one keyword board (LinkedIn, Indeed, Google, ZipRecruiter) may run before its worker process is killed. Each board runs on its own, so a stuck one never strands the rest of the search.', 'jobspy_board_timeout', { int: true, w: '90px' }),
+      ['system', '', 'System', '', [
         E('Extra role families', 'Role résumés beyond Software Engineering, Product/TPM and Data/ML. Each family selects and orders the same verified Career Evidence — it never changes what a résumé may claim.', 'role_families',
           { json: true, sub: 'JSON list of {id, label, title: [...], evidence: [...]}' }),
         { kind: 'apikey', label: 'Dashboard API key', help: 'Saving refreshes the session cookie so iframes keep working.' },
-        BT('DB backup', 'DB snapshot now, outside the cron.', 'Run backup', () => api.post('/db/backup')),
       ]],
     ]
+
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [S, resumes, personaAvailable, trig, li])
 
@@ -789,6 +819,10 @@ function Row({ r, ctx }) {
       }
       case 'linkedin':
         return <LinkedInRow li={li} setLi={setLi} flash={flash} />
+      // Not a Setting row: job criteria live in their own document, edited here
+      // and on the Jobs screen through the same endpoint (see jobPrefs.js).
+      case 'jobprefs':
+        return <JobPrefsRow />
       default:
         return null
     }
@@ -798,7 +832,7 @@ function Row({ r, ctx }) {
     // Label column shrinks rather than holding a hard 340px; below ~720px of pane it moves above the controls entirely,
     // otherwise the pill + Override toggle on the LLM rows clip off the right edge.
     // ui: keep — a settings row, not a header row: bottom rule is a list row divider (scanner files it under header-row by that rule)
-    <div style={{ display: 'flex', flexDirection: narrow ? 'column' : 'row', alignItems: narrow ? 'stretch' : 'center', gap: narrow ? 10 : 24, minHeight: 52, padding: '9px 0', borderBottom: '1px solid var(--line-soft)' }}>
+    <div style={{ display: 'flex', flexDirection: narrow || r.full ? 'column' : 'row', alignItems: narrow || r.full ? 'stretch' : 'center', gap: narrow || r.full ? 10 : 24, minHeight: 52, padding: '9px 0', borderBottom: '1px solid var(--line-soft)' }}>
       {/* Column width scales with the row-help font size: 340 × 11.5/11 = 355.45 → 356 (200 → 210), so every row's help
           wraps on the same word. Without it, the longest string on the page grows its row 55px → 71px. */}
       <div style={{ flex: narrow ? '0 0 auto' : '0 1 356px', minWidth: narrow ? 0 : 210, display: 'flex', flexDirection: 'column', gap: 2 }}>
@@ -821,9 +855,22 @@ function Row({ r, ctx }) {
           <Surface radius="row" pad="8px 10px" style={{ fontSize: 11, lineHeight: '17px', color: 'var(--text-2)', marginTop: 5, textWrap: 'pretty' }}>{r.info}</Surface>
         )}
       </div>
-      <div style={{ flex: narrow ? '0 0 auto' : 1, minWidth: 0, display: 'flex', alignItems: 'center', flexWrap: narrow ? 'wrap' : 'nowrap', gap: 8 }}>{right}</div>
+      {/* A `full` row's control is a form, not a field: it takes the whole width
+          under its label instead of sharing the line with it. */}
+      <div style={r.full
+        ? { flex: '1 1 100%', minWidth: 0, marginTop: 4 }
+        : { flex: narrow ? '0 0 auto' : 1, minWidth: 0, display: 'flex', alignItems: 'center', flexWrap: narrow ? 'wrap' : 'nowrap', gap: 8 }}>{right}</div>
     </div>
   )
+}
+
+// The shared Job Preferences form. It owns its own load/save through
+// /api/job-preferences rather than the settings blob, because these criteria are
+// one document the Jobs screen edits too — not a bag of independent keys.
+function JobPrefsRow() {
+  const { prefs, taxonomy, patch, toggle, error } = useJobPreferences()
+  if (error) return <Helper style={{ color: 'var(--bad)' }}>{error}</Helper>
+  return <JobPreferencesForm prefs={prefs} taxonomy={taxonomy} patch={patch} toggle={toggle} />
 }
 
 // ── Display rows (localStorage, not settings) ────────────────────────────────

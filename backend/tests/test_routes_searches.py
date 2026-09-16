@@ -70,8 +70,8 @@ def _seed_global_exclude(db, keywords):
 
 def _mk_keyword_search(db, **kw):
     from backend.models.db import Search
-    # title_exclude_keywords defaults to ["intern", "junior", "associate"]; blank it so these
-    # tests measure only the global list, unless a test deliberately exercises the per-search layer.
+    # title_exclude_keywords now defaults to []; kept explicit so these tests keep
+    # measuring only the global list whatever the column default becomes.
     kw.setdefault("title_exclude_keywords", [])
     s = Search(name="Global exclude probe", search_mode="keyword", active=True,
                sources=["indeed"], search_term="program manager", **kw)

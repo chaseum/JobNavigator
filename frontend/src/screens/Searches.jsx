@@ -92,7 +92,10 @@ const DEPTHS = [
   { id: 'light', label: 'Light', dots: 1, hint: 'Score only. Low cost.' },
   { id: 'full', label: 'Full', dots: 2, hint: 'Score plus the full report with keywords and requirements' },
 ]
-const SOURCES = [['linkedin', 'LinkedIn'], ['indeed', 'Indeed'], ['zip_recruiter', 'ZipRecruiter'], ['google', 'Google Jobs'], ['direct', 'Direct (Playwright)']]
+// 'direct' is NOT here: the JobSpy runner filters it out of `sources` before the
+// call, so offering it was a checkbox that did nothing. Direct scraping happens
+// through company/ATS monitoring instead (backend/discovery/careers.py).
+const SOURCES = [['linkedin', 'LinkedIn'], ['indeed', 'Indeed'], ['zip_recruiter', 'ZipRecruiter'], ['google', 'Google Jobs']]
 const COLLECTIONS = [['recommended', 'Recommended'], ['top-applicant', 'Top Applicant']]
 
 // note banners reuse the mode-badge palettes (sm-levels green / sm-jobright teal)
@@ -151,7 +154,10 @@ const draftOf = (s) => ({
 })
 // New search opens on Light, matching the Add-company modal — keeps the one
 // control that spends money per scraped job consistent across creation flows.
-const NEW_DRAFT = draftOf({ sources: ['linkedin', 'indeed', 'zip_recruiter', 'google'], title_exclude_keywords: ['intern', 'junior', 'associate'], auto_scoring_depth: 'light' })
+// No default title exclusions: "intern, junior, associate" silently deleted the
+// entire early-career feed. Seniority is a user criterion the Preference Gate
+// decides (backend/discovery/gate.py), not a hidden keyword filter.
+const NEW_DRAFT = draftOf({ sources: ['linkedin', 'indeed', 'zip_recruiter', 'google'], title_exclude_keywords: [], auto_scoring_depth: 'light' })
 
 // Numeric bounds live in one place so an input's min/max and the payload clamp
 // can't drift apart.

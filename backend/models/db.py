@@ -73,7 +73,11 @@ class Search(Base):
     hours_old = Column(Integer, default=24)
     results_wanted = Column(Integer, default=50)
     title_include_keywords = Column(JSON, default=[])
-    title_exclude_keywords = Column(JSON, default=["intern", "junior", "associate"])
+    # Deliberately empty. A blanket intern/junior/associate exclusion silently
+    # deleted the entire early-career feed before anything could score it;
+    # seniority is a user criterion the Preference Gate decides, not a hidden
+    # title filter (backend/discovery/gate.py).
+    title_exclude_keywords = Column(JSON, default=[])
     company_filter = Column(JSON, default=[])
     company_exclude = Column(JSON, default=[])
     max_pages = Column(Integer, default=50)
@@ -117,6 +121,15 @@ class Company(Base):
     # See Search.warning_acknowledged_at — same contract, per company.
     warning_acknowledged_at = Column(DateTime(timezone=True), nullable=True)
     notes = Column(Text, nullable=True)
+    # How automatic company monitoring left this row (backend/discovery/careers.py):
+    # "monitored"  a supported careers source was DERIVED from a real posting URL
+    # "unresolved" we looked and found no supported source — aggregators still
+    #              supply its jobs, and we do not look again on every new posting
+    # NULL         never touched by automatic discovery (a row the user owns)
+    direct_monitor_status = Column(String(16), nullable=True)
+    # True when automatic discovery created this row, so a manually added
+    # company is never mistaken for one the app may reconfigure.
+    auto_discovered = Column(Boolean, default=False)
 
 
 class VisaCache(Base):
@@ -189,6 +202,26 @@ class Job(Base):
     h1b_jd_flag = Column(Boolean, default=False)
     h1b_jd_snippet = Column(String, nullable=True)
     h1b_verdict = Column(String, nullable=True)  # likely | unlikely | unknown
+    # ── Derived search metadata (backend/discovery) ──────────────────────────
+    # Parsed deterministically from title + description at insert, so the feed
+    # can filter on seniority, function and years in SQL without waiting for —
+    # or paying for — an LLM analysis. NULL/empty means "not resolved", which
+    # the Preference Gate reads as UNKNOWN and never as a rejection.
+    job_function = Column(String(40), nullable=True, index=True)
+    # A posting can hold several levels ("New Grad / Entry"). Stored as a
+    # comma-delimited string with leading and trailing commas (",new_grad,entry,")
+    # rather than JSON, because that is the one shape a LIKE '%,entry,%' filter
+    # answers identically on Postgres and on the SQLite the tests run against;
+    # jsonb containment does not exist on SQLite. Pack/unpack live in
+    # backend/discovery/taxonomy.py, and nothing else reads the raw column.
+    experience_levels = Column(String(120), nullable=True)
+    job_type = Column(String(16), nullable=True, index=True)   # fulltime|internship|contract|parttime
+    min_years_experience = Column(Integer, nullable=True)
+    max_years_experience = Column(Integer, nullable=True)
+    # The Preference Gate's stored verdict: True = plausibly what the user asked
+    # for, False = rejected with `gate_reasons` saying why, NULL = never gated.
+    gate_ok = Column(Boolean, nullable=True, index=True)
+    gate_reasons = Column(JSON, nullable=True)          # {"reasons": [...], "uncertain": [...]}
     cv_scores = Column(JSON, default={})     # {"CV Name": score, ...}
     best_cv_score = Column(Float, nullable=True, index=True)
     best_cv = Column(String, nullable=True)
@@ -297,6 +330,21 @@ for _col in Job.__table__.columns:
     if isinstance(_col.type, String):
         event.listen(getattr(Job, _col.name), "set", _make_job_field_sanitizer(), retval=True)
 del _col
+
+
+# Every collector builds rows as `Job(...)` — JobSpy, each ATS handler, the
+# company page scraper, both extension endpoints and the manual add. Deriving
+# search metadata on the mapper covers all of them at once, including sources
+# added later, instead of each one remembering to call it.
+@event.listens_for(Job, "before_insert")
+def _derive_search_metadata(mapper, connection, target):
+    try:
+        from backend.discovery.gate import apply_derived_metadata
+        apply_derived_metadata(target)
+    except Exception:   # deriving metadata must never cost us the posting itself
+        import logging
+        logging.getLogger("jobnavigator.models").warning(
+            "could not derive search metadata for a job", exc_info=True)
 
 
 # ── Applications ─────────────────────────────────────────────────────────────

@@ -37,7 +37,7 @@ class SearchCreate(BaseModel):
     hours_old: Optional[int] = 24
     results_wanted: Optional[int] = 50
     title_include_keywords: list = []
-    title_exclude_keywords: list = ["intern", "junior", "associate"]
+    title_exclude_keywords: list = []   # see Search.title_exclude_keywords — no default seniority exclusion
     company_filter: list = []
     company_exclude: list = []
     exclude_active_companies: bool = False

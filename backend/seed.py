@@ -8,9 +8,41 @@ from sqlalchemy import text
 logger = logging.getLogger("jobnavigator.seed")
 
 
+# The starting preferences a fresh install discovers with. Duplicated from
+# backend.discovery.preferences.DEFAULTS rather than imported, because seeding
+# runs before anything else and must not drag the discovery package (and its
+# model imports) into module import order; preferences.normalize() is the
+# authority on the shape either way.
+_JOB_PREFERENCE_DEFAULTS = {
+    "countries": ["US"],
+    "locations": [],
+    "job_functions": ["software_engineering"],
+    "levels": ["intern", "new_grad", "entry"],
+    "job_types": ["fulltime", "internship"],
+    "work_models": ["onsite", "hybrid", "remote"],
+    "date_posted_days": 7,
+    "max_years_experience": 2,
+    "companies": [],
+    "excluded_companies": [],
+    "minimum_salary": None,
+    "sponsorship": "any",
+    "industries": [],
+    "title_query": "",
+}
+
 DEFAULT_SETTINGS = {
     "fit_score_threshold": ("60", "Minimum fit score to trigger Telegram alert"),
     "scrape_interval_minutes": ("60", "How often the job checker runs"),
+    # ── Discovery (backend/discovery) ────────────────────────────────────────
+    # job_preferences is the ONE canonical statement of what the user wants;
+    # both the Jobs toolbar and Settings write to it. Its shape lives in
+    # backend/discovery/preferences.DEFAULTS, which also normalises it on read,
+    # so a hand-edited value can never break the pipeline.
+    "job_preferences": (json.dumps(_JOB_PREFERENCE_DEFAULTS),
+                        "Canonical job-search preferences: functions, levels, locations, work models, dates, experience ceiling"),
+    "saved_job_filters": (json.dumps([]), "Named job-criteria filters; every active one adds to the Discovery Plan"),
+    "discovery_interval_minutes": ("30", "How often automatic discovery re-runs the current plan (0 = off)"),
+    "auto_analysis_enabled": ("true", "Automatically run Candidate Fit on jobs that pass your preferences"),
     "email_check_interval_minutes": ("30", "How often Gmail is polled"),
     "telegram_enabled": ("false", "Toggle all Telegram notifications on/off"),
     "digest_cron": ("0 8 * * *", "Daily digest cron (min hour day month dow). Empty = disabled"),
@@ -581,6 +613,19 @@ def run_migration_statements(db, statements) -> list:
 def run_migrations(db):
     """Run ALTER TABLE migrations for columns that create_all() won't add to existing tables."""
     migrations = [
+        # Derived search metadata + the Preference Gate verdict (backend/discovery).
+        "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS job_function VARCHAR(40)",
+        "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS experience_levels VARCHAR(120)",
+        "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS job_type VARCHAR(16)",
+        "CREATE INDEX IF NOT EXISTS ix_jobs_job_type ON jobs(job_type)",
+        "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS min_years_experience INTEGER",
+        "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS max_years_experience INTEGER",
+        "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS gate_ok BOOLEAN",
+        "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS gate_reasons JSONB",
+        "CREATE INDEX IF NOT EXISTS ix_jobs_job_function ON jobs(job_function)",
+        "CREATE INDEX IF NOT EXISTS ix_jobs_gate_ok ON jobs(gate_ok)",
+        "ALTER TABLE companies ADD COLUMN IF NOT EXISTS direct_monitor_status VARCHAR(16)",
+        "ALTER TABLE companies ADD COLUMN IF NOT EXISTS auto_discovered BOOLEAN DEFAULT FALSE",
         "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS source_url VARCHAR",
         "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS canonical_url VARCHAR",
         "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS apply_url VARCHAR",

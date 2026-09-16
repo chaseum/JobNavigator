@@ -116,9 +116,18 @@ def list_jobs(
     # Role Match filters read each job's latest Copilot analysis; setting any of
     # them keeps analyzed jobs only.
     min_match: Optional[int] = None,
+    # `level`, `job_function`, `job_type` and `max_years` read the DERIVED
+    # metadata columns (backend/discovery), so they work on every posting rather
+    # than only the analyzed ones. `employment_type` is the older analysis-backed
+    # filter and is kept for the classic UI.
     level: Optional[str] = None,
+    job_function: Optional[str] = None,
+    job_type: Optional[str] = None,
     employment_type: Optional[str] = None,
     max_years: Optional[int] = None,
+    # recommended=1 means "passed my preferences and is worth my attention" —
+    # see _criteria_clauses. It is the Recommended tab, and nothing else.
+    recommended: bool = False,
     since_days: Annotated[Optional[int], Query(ge=0)] = None,
     sort_by: Optional[str] = Query("date", pattern="^(date|score|salary|company|match)$"),
     # ge=0: without a lower bound a negative limit reaches Postgres as LIMIT -5,
@@ -170,9 +179,13 @@ def list_jobs(
         q = q.filter(clause)
     if since_days is not None:
         q = q.filter(Job.discovered_at >= utcnow() - timedelta(days=since_days))
-    if min_match is not None or level or employment_type or max_years is not None:
-        q = q.filter(Job.id.in_(_analysis_filter_ids(_latest_analyses(db), min_match=min_match, level=level,
-                                                     employment_type=employment_type, max_years=max_years)))
+    for clause in _criteria_clauses(job_function=job_function, level=level, job_type=job_type,
+                                    max_years=max_years, recommended=recommended,
+                                    min_match=_recommend_floor(db) if recommended else None):
+        q = q.filter(clause)
+    if min_match is not None or employment_type:
+        q = q.filter(Job.id.in_(_analysis_filter_ids(_latest_analyses(db), min_match=min_match,
+                                                     employment_type=employment_type)))
 
     total = q.count()
 
@@ -338,6 +351,24 @@ def _job_description_is_valid(job) -> bool:
 _BRIEF_DROPPED = ("description", "scoring_report", "h1b_jd_snippet")
 
 
+def _levels_list(packed):
+    from backend.discovery import taxonomy as _T
+    return _T.unpack_levels(packed)
+
+
+def _recommend_floor(db):
+    """The Candidate Fit at or above which a job counts as recommended.
+
+    One setting, shared with the rest of the app — the Recommended tab and the
+    job card must not be able to disagree about what a good match is."""
+    from backend.models.db import Setting
+    row = db.query(Setting).filter(Setting.key == "role_match_min_recommended").first()
+    try:
+        return int(row.value) if row and row.value else 70
+    except (TypeError, ValueError):
+        return 70
+
+
 def _expand_company_filter(db, company):
     """Expand a comma-separated list of company names to include all aliases of each (e.g. 'Amazon' also matches 'Audible', 'AWS'); empty input returns None, and orphan names pass through unchanged."""
     if not company:
@@ -392,6 +423,44 @@ def _location_clause(raw):
     from sqlalchemy import exists
     return or_(*[exists().where(clause) for clause in clauses])
 
+
+def _criteria_clauses(job_function=None, level=None, job_type=None, max_years=None,
+                      recommended=None, min_match=None):
+    """Filters that read the DERIVED search metadata columns, not a job analysis.
+
+    These are the Jobs toolbar's primary filters. They deliberately run in SQL
+    off `job_function` / `experience_levels` / `job_type` / `min_years_experience`,
+    which every posting gets at insert — the old level and experience filters read
+    the LLM analysis instead, so they hid every job that had not been analyzed yet.
+    """
+    from sqlalchemy import or_
+    from backend.discovery import taxonomy as _T
+
+    clauses = []
+    values = [v.strip() for v in (job_function or "").split(",") if v.strip()]
+    if values:
+        clauses.append(Job.job_function.in_(values))
+    values = [v.strip() for v in (level or "").split(",") if v.strip()]
+    if values:
+        # A posting with NO resolved seniority stays visible: unknown is not a
+        # mismatch, and dropping it is how a feed goes quiet for no visible reason.
+        clauses.append(or_(Job.experience_levels.is_(None),
+                           *[Job.experience_levels.like(_T.level_like(v)) for v in values]))
+    values = [v.strip() for v in (job_type or "").split(",") if v.strip()]
+    if values:
+        clauses.append(or_(Job.job_type.is_(None), Job.job_type.in_(values)))
+    if max_years is not None:
+        clauses.append(or_(Job.min_years_experience.is_(None),
+                           Job.min_years_experience <= int(max_years)))
+    if recommended:
+        # Recommended = passed the Preference Gate, and either already scores at
+        # or above the recommendation threshold or has not been analyzed yet (it
+        # shows as "Analyzing…" rather than being hidden).
+        clauses.append(Job.gate_ok.isnot(False))
+        if min_match is not None:
+            score = _match_score_col()
+            clauses.append(or_(score.is_(None), score >= float(min_match)))
+    return clauses
 
 ARRANGEMENTS = ("remote", "hybrid", "onsite", "unknown")
 
@@ -622,8 +691,11 @@ def job_facets(
     search_id: Optional[str] = None,
     min_match: Optional[int] = None,
     level: Optional[str] = None,
+    job_function: Optional[str] = None,
+    job_type: Optional[str] = None,
     employment_type: Optional[str] = None,
     max_years: Optional[int] = None,
+    recommended: bool = False,
     since_days: Annotated[Optional[int], Query(ge=0)] = None,
     db: Session = Depends(get_db),
 ):
@@ -652,8 +724,31 @@ def job_facets(
                 min_score=min_score, saved=saved, title_search=title_search, remote=remote, location=location, arrangement=arrangement,
                 min_salary=min_salary, max_salary=max_salary, search_id=search_id, since_days=since_days)
     analyses = _latest_analyses(db)
-    af = dict(min_match=min_match, level=level, employment_type=employment_type, max_years=max_years)
+    af = dict(min_match=min_match, employment_type=employment_type)
     base["job_ids"] = _analysis_filter_ids(analyses, **af)
+
+    def _criteria_ids(**lifted):
+        """Job ids passing the derived-metadata filters, with `lifted` ones dropped."""
+        kw = dict(job_function=job_function, level=level, job_type=job_type,
+                  max_years=max_years, recommended=recommended,
+                  min_match=_recommend_floor(db) if recommended else None)
+        kw.update(lifted)
+        clauses = _criteria_clauses(**kw)
+        if not clauses:
+            return None
+        q = db.query(Job.id)
+        for clause in clauses:
+            q = q.filter(clause)
+        return [row[0] for row in q.all()]
+
+    def _intersect(ids_a, ids_b):
+        if ids_a is None:
+            return ids_b
+        if ids_b is None:
+            return ids_a
+        return list(set(ids_a) & set(ids_b))
+
+    base["job_ids"] = _intersect(base["job_ids"], _criteria_ids())
 
     def _counts(col, drop):
         """(value, count) rows for one column with that column's own filter lifted."""
@@ -811,9 +906,38 @@ def job_facets(
         "locations": locations,
         "arrangements": arrangements,
         "score_bands": score_bands,
-        "levels": _analysis_facet(db, base, analyses, af, "experience_level", "level"),
+        # Seniority, function and employment type come from the DERIVED columns,
+        # so every posting is counted — not only the ones an LLM has looked at.
+        "job_functions": _derived_facet(db, base, Job.job_function, _criteria_ids(job_function=None)),
+        "levels": _level_facet(db, base, _criteria_ids(level=None)),
+        "job_types": _derived_facet(db, base, Job.job_type, _criteria_ids(job_type=None)),
         "employment_types": _analysis_facet(db, base, analyses, af, "employment_type", "employment_type"),
     }
+
+
+def _derived_facet(db, base, column, ids):
+    """Counts of one derived column, with that column's own filter lifted."""
+    kw = dict(base)
+    kw["job_ids"] = ids
+    rows = _apply_common_filters(
+        db.query(column, func.count(Job.id)).filter(column.isnot(None), column != ""), **kw
+    ).group_by(column).all()
+    return [{"name": n, "count": c} for n, c in sorted(rows, key=lambda x: (-x[1], x[0]))]
+
+
+def _level_facet(db, base, ids):
+    """Counts per seniority. A posting listing two levels is counted under both,
+    so these deliberately do not sum to the total."""
+    from backend.discovery import taxonomy as _T
+    kw = dict(base)
+    kw["job_ids"] = ids
+    counts = {}
+    for (packed,) in _apply_common_filters(
+            db.query(Job.experience_levels).filter(Job.experience_levels.isnot(None)), **kw).all():
+        for level in _T.unpack_levels(packed):
+            counts[level] = counts.get(level, 0) + 1
+    order = {k: i for i, k in enumerate(_T.LEVEL_IDS)}
+    return [{"name": n, "count": c} for n, c in sorted(counts.items(), key=lambda x: order.get(x[0], 99))]
 
 
 def _analysis_facet(db, base, analyses, af, field, kwarg):
@@ -1394,6 +1518,15 @@ def _job_to_dict(j: Job, tailored_resume_id=None, in_flight: list[str] | None = 
         "salary_currency": j.salary_currency,
         "salary_period": j.salary_period,
         "employment_type": j.employment_type,
+        # Derived search metadata (backend/discovery): what the feed filters on,
+        # and what a card shows as seniority without waiting for an analysis.
+        "job_function": j.job_function,
+        "experience_levels": _levels_list(j.experience_levels),
+        "job_type": j.job_type,
+        "min_years_experience": j.min_years_experience,
+        "max_years_experience": j.max_years_experience,
+        "gate_ok": j.gate_ok,
+        "gate_reasons": (j.gate_reasons or {}).get("reasons") or [],
         "published_at": j.published_at.isoformat() if j.published_at else None,
         "h1b_company_lca_count": j.h1b_company_lca_count,
         "h1b_company_approval_rate": j.h1b_company_approval_rate,

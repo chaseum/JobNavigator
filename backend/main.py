@@ -25,6 +25,7 @@ from backend.api.routes_autofill import router as autofill_router
 from backend.api.routes_llm import router as llm_router
 from backend.api.routes_profile import router as profile_router
 from backend.api.routes_copilot import router as copilot_router
+from backend.api.routes_discovery import router as discovery_router
 from backend.api.routes_resume_versions import router as resume_versions_router
 
 logging.basicConfig(level=logging.INFO)
@@ -329,6 +330,7 @@ app.include_router(autofill_router, prefix="/api")
 app.include_router(llm_router, prefix="/api")
 app.include_router(profile_router, prefix="/api")
 app.include_router(copilot_router, prefix="/api")
+app.include_router(discovery_router, prefix="/api")
 app.include_router(resume_versions_router, prefix="/api")
 
 
@@ -474,6 +476,10 @@ async def trigger_all_scrapes():
         outcome = await run_all_searches(force=True) or {}
         from backend.analyzer.cv_scorer import analyze_unscored_jobs
         await analyze_unscored_jobs()
+        # Same pipeline stage the scheduler runs: gate what was just collected,
+        # canonicalise its companies and queue Candidate Fit for the matches.
+        from backend.discovery.engine import post_collection
+        post_collection()
         summary = _scrape_summary(started)
         # Name what did not run, so a company missing from the sweep is visible in
         # the run history instead of only in the container log.

@@ -30,6 +30,7 @@ import Profile from './screens/Profile'
 import JobDetail from './screens/JobDetail'
 import AnswerBank from './screens/AnswerBank'
 import Dashboard from './screens/Dashboard'
+import Advanced from './screens/Advanced'
 import Stats from './screens/Stats'
 import axios from 'axios'
 import { useTheme } from './theme'
@@ -252,6 +253,8 @@ function App() {
           <Route path="answer-bank" element={<AnswerBank />} />
           <Route path="dashboard" element={<Dashboard />} />
           <Route path="stats" element={<Stats />} />
+          {/* Developer diagnostics: reachable from Settings → Advanced, never in the sidebar. */}
+          <Route path="advanced" element={<Advanced />} />
         </Route>
         {/* labRoute returns null when design-base/ is absent; React skips a null child. */}
         {labRoute('ToastLab', '/toasts')}
