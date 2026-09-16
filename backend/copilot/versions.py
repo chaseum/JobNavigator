@@ -13,6 +13,7 @@ from sqlalchemy.orm.attributes import flag_modified
 from backend.copilot import facts as F
 from backend.copilot import latex, parser_health
 from backend.copilot import resume_pipeline as P
+from backend.copilot import role_families as RF
 from backend.models.db import Job, JobAnalysisRecord, Persona, ResumeVersion, SessionLocal, Setting, utcnow
 
 logger = logging.getLogger("jobnavigator.copilot.versions")
@@ -30,8 +31,8 @@ def resume_settings(db) -> dict:
         order = json.loads(get("resume_section_order", "[]")) or P.DEFAULT_SECTION_ORDER
     except ValueError:
         order = P.DEFAULT_SECTION_ORDER
-    template = get("resume_template", "default")
-    return {"template": template if template in latex.template_names() else "default",
+    template = get("resume_template", latex.DEFAULT_TEMPLATE)
+    return {"template": template if template in latex.template_names() else latex.DEFAULT_TEMPLATE,
             "page_target": int(get("resume_page_target", "1") or 1),
             "project_policy": get("resume_project_policy", "reorder"),
             "skill_ordering": get("resume_skill_ordering", "relevance"),
@@ -78,17 +79,30 @@ def _index(db):
 
 # ── generation ───────────────────────────────────────────────────────────────
 
-async def generate_base() -> str:
+async def generate_base(role_family: str | None = None) -> str:
+    """A base résumé from the verified Career Evidence, optionally as one role family's selection.
+
+    Reproducible and versioned like any other résumé version: the row records the
+    profile version and template version it was built from, so regenerating after
+    the evidence changes leaves the old base intact.
+    """
+    from backend.copilot import role_families as RF
     db = SessionLocal()
     try:
         ix, persona = _index(db)
         if not ix.facts:
             raise ValueError("verify some profile facts first")
+        family = None
+        if role_family:
+            family = RF.get(role_family, db)
+            if family is None:
+                raise ValueError(f"unknown role family {role_family!r}")
         st = resume_settings(db)
-        resume = P.build_base(ix, persona, st["section_order"], st["template"])
+        resume = P.build_base(ix, persona, st["section_order"], st["template"], family)
         audit = await P.audit_resume(resume, ix, use_llm=False)
         v = ResumeVersion(kind="base", status="draft", template=st["template"], template_version=latex.template_version(st["template"]),
-                          candidate_profile_version=F.profile_version(db), resume_json=resume, audit=audit)
+                          candidate_profile_version=F.profile_version(db), resume_json=resume, audit=audit,
+                          role_family=family["id"] if family else None)
         db.add(v)
         db.commit()
         vid = str(v.id)
@@ -98,8 +112,19 @@ async def generate_base() -> str:
     return vid
 
 
+def ensure_role_family(db, rec) -> str:
+    """The job's role family, classified once and then left alone so a user override sticks."""
+    if rec.role_family:
+        return rec.role_family
+    verdict = RF.classify(rec.analysis or {}, db)
+    rec.role_family, rec.role_family_source = verdict["family"] or None, "auto"
+    rec.role_family_reason = f"{verdict['reason']} (confidence {verdict['confidence']})"
+    db.commit()
+    return rec.role_family
+
+
 async def generate_tailored(job_id: str) -> str:
-    """Audit the base résumé, tailor toward its SAFE_TO_ADD / SAFE_TO_REPHRASE gaps with verified facts only, re-audit the draft."""
+    """Audit the role-family base résumé, tailor toward its SAFE_TO_ADD / SAFE_TO_REPHRASE gaps with verified facts only, re-audit the draft."""
     from backend.copilot import applicability as AP
     from backend.copilot import resume_audits as RA
     from backend.copilot.analysis import evidence_context, latest_record, weights
@@ -113,29 +138,38 @@ async def generate_tailored(job_id: str) -> str:
         st = resume_settings(db)
         snapshot = {"analysis_id": rec.id, "analysis": rec.analysis, "evidence": rec.evidence, "match": rec.match,
                     "profile_version": rec.profile_version}
-        base = RA.base_version(db)
+        # verified evidence -> role-family base -> this JD -> tailored draft. The
+        # family decides which base selection the draft starts from; it is a label
+        # for that choice and never an input to Candidate Fit.
+        family_id = ensure_role_family(db, rec)
+        family = RF.get(family_id, db) if family_id else None
+        base = RA.base_version(db, family_id)
         base_id, label = (base.id if base else None), f"{job.company} — {job.title}"
         version = F.profile_version(db)
         _, facts_by_ref, _ = evidence_context(db)
         if base is not None:
+            base_resume = base.resume_json or {}
             base_audit = RA.compute(db, rec, base, facts_by_ref)
-        else:   # no base version yet: measure against what a base résumé from the profile would show
-            base_audit = AP.audit(rec.analysis.get("requirements") or [], rec.evidence, P.build_base(ix, persona, st["section_order"]),
+        else:   # no base version yet: measure against what this family's base would show
+            base_resume = P.build_base(ix, persona, st["section_order"], st["template"], family)
+            base_audit = AP.audit(rec.analysis.get("requirements") or [], rec.evidence, base_resume,
                                   facts_by_ref, None, weights(db), rec.analysis.get("technologies") or [])
     finally:
         db.close()
 
     gaps = [r for r in base_audit["rows"] if r.get("gap") in ("SAFE_TO_ADD", "SAFE_TO_REPHRASE")]
-    resume, audit, provider, model = await P.tailor(ix, persona, snapshot["analysis"], snapshot["evidence"], st, job_id, gaps=gaps)
+    resume, audit, provider, model = await P.tailor(ix, persona, snapshot["analysis"], snapshot["evidence"], st, job_id,
+                                                    gaps=gaps, base_resume=base_resume, role_family=family_id)
     snapshot["applicability"] = {"base_version_id": str(base_id) if base_id else None, "base_score": base_audit["score"],
-                                 "maximum": base_audit["maximum"], "gaps_targeted": [g["requirement_id"] for g in gaps]}
+                                 "maximum": base_audit["maximum"], "gaps_targeted": [g["requirement_id"] for g in gaps],
+                                 "role_family": family_id}
 
     db = SessionLocal()
     try:
         v = ResumeVersion(job_id=job_id, kind="tailored", status="draft", template=st["template"],
                           template_version=latex.template_version(st["template"]), candidate_profile_version=version,
                           job_analysis_id=snapshot["analysis_id"], job_analysis=snapshot, base_version_id=base_id,
-                          provider=provider, model=model, resume_json=resume, audit=audit)
+                          role_family=family_id, provider=provider, model=model, resume_json=resume, audit=audit)
         db.add(v)
         db.commit()
         vid = str(v.id)

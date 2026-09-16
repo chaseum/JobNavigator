@@ -72,6 +72,21 @@ def _get_setting_value(db, key: str, default: str = "") -> str:
     return row.value if row else default
 
 
+async def _score_new_jobs() -> None:
+    """Run the legacy CV-score sweep over newly stored jobs, contained.
+
+    Scraping and scoring are separate concerns: the postings are already committed
+    by the time this runs, so a scorer that raises, hangs or has no LLM configured
+    must never turn a successful scrape into a failed one (it previously aborted the
+    single-search API trigger and, before that, the rest of the fan-out).
+    """
+    try:
+        from backend.analyzer.cv_scorer import analyze_unscored_jobs
+        await analyze_unscored_jobs(status="new")
+    except Exception as e:
+        logger.exception(f"Scoring sweep failed (the scrape itself succeeded): {e}")
+
+
 # ── Per-source outcome helpers ───────────────────────────────────────────────
 # A multi-board search stores {"indeed": {"seen": 9, "new": 0}, "zip_recruiter":
 # {"error": "403"}} on ScrapeLog; these three helpers are the only readers.
@@ -259,13 +274,7 @@ async def run_all(force: bool = False):
                 search_sweep_needed = True
 
         if search_sweep_needed:
-            # Contained: a scoring failure must not abort the rest of scrape_all
-            # (career-page scrapes below would never run).
-            try:
-                from backend.analyzer.cv_scorer import analyze_unscored_jobs
-                await analyze_unscored_jobs(status="new")
-            except Exception as e:
-                logger.exception(f"Post-search scoring sweep failed (scrape continues): {e}")
+            await _score_new_jobs()
 
         from backend.scraper.sources.company_pages import scrape_career_pages
         company_summary = await scrape_career_pages(force=force) or {}
@@ -338,8 +347,7 @@ async def _run_search_by_id(search_id: str, auto_score: Optional[bool] = None) -
             logger.warning(f"Search '{search.name}': {describe_source_errors(breakdown)}")
 
         if should_score and result and result.get("new_jobs", 0) > 0:
-            from backend.analyzer.cv_scorer import analyze_unscored_jobs
-            await analyze_unscored_jobs(status="new")
+            await _score_new_jobs()
 
         return result
     finally:

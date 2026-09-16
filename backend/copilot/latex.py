@@ -15,6 +15,10 @@ from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "resume" / "templates"
 
+# Jake Gutierrez's "Jake's Resume" (backend/resume/templates/jakes) is the default
+# generated layout; a user who picked another template keeps it (see resume_settings).
+DEFAULT_TEMPLATE = "jakes"
+
 _ESCAPES = {
     "\\": r"\textbackslash{}", "&": r"\&", "%": r"\%", "$": r"\$", "#": r"\#", "_": r"\_",
     "{": r"\{", "}": r"\}", "~": r"\textasciitilde{}", "^": r"\textasciicircum{}",
@@ -64,7 +68,7 @@ def template_version(name: str) -> str:
     return h.hexdigest()[:12]
 
 
-def render(resume: dict, template: str = "default") -> str:
+def render(resume: dict, template: str = DEFAULT_TEMPLATE) -> str:
     env = Environment(
         loader=FileSystemLoader(str(template_dir(template))),
         block_start_string="((*", block_end_string="*))",
@@ -91,7 +95,7 @@ def _errors_from_log(log: str) -> str:
     return "\n".join(picked) if picked else "\n".join(lines[-25:])
 
 
-async def compile_pdf(tex: str, template: str = "default", timeout: float = 90) -> dict:
+async def compile_pdf(tex: str, template: str = DEFAULT_TEMPLATE, timeout: float = 90) -> dict:
     """{"ok", "pdf", "pages", "log"}; a failure carries the TeX error, never a half-built PDF."""
     exe = compiler()
     if not exe:

@@ -24,6 +24,7 @@ def _summary(v: ResumeVersion) -> dict:
         "counts": (v.audit or {}).get("counts"), "blocked": bool((v.audit or {}).get("blocked")),
         "parser_health": (v.parser_health or {}).get("score"), "output_dir": v.output_dir,
         "match_score": ((v.job_analysis or {}).get("match") or {}).get("score"),
+        "role_family": v.role_family,
     }
 
 
@@ -69,10 +70,32 @@ def list_versions(job_id: str | None = None, status: str | None = None, db: Sess
             for r in rows]
 
 
+@router.get("/role-families")
+def role_families(db: Session = Depends(get_db)):
+    """Each role family and the base résumé it currently has, for viewing and regenerating them.
+
+    A family base is a selection over the same verified Career Evidence, so
+    regenerating one never changes a fact — only what that role's résumé leads with.
+    """
+    from backend.copilot import resume_audits as RA
+    from backend.copilot import role_families as RF
+    out = []
+    for f in RF.families(db):
+        base = RA.base_version(db, f["id"])
+        if base is not None and base.role_family != f["id"]:
+            base = None                       # the universal base is a fallback, not this family's base
+        out.append({"id": f["id"], "label": f["label"], "builtin": f["builtin"],
+                    "base": _summary(base) if base is not None else None})
+    universal = RA.base_version(db)
+    return {"families": out,
+            "universal_base": _summary(universal) if universal is not None and not universal.role_family else None}
+
+
 @router.post("/base", status_code=201)
 @_errors
-async def create_base():
-    vid = await V.generate_base()
+async def create_base(body: dict | None = None):
+    """Generate a base résumé; `role_family` makes it that family's base instead of the universal one."""
+    vid = await V.generate_base((body or {}).get("role_family") or None)
     db = V.SessionLocal()
     try:
         return _summary(db.get(ResumeVersion, vid))

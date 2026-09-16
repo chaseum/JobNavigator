@@ -1,20 +1,35 @@
 """The run summary must agree with the ScrapeLog row and with the rows the run actually stored: `_run_sync` counts title-filtered postings (still stored as `ignored`) into `ignored_jobs` and a per-board `filtered` entry, and the summary is built by reading the log row back so it cannot drift from the audit trail."""
-import sys
-import types
 
 import pytest
 
 from backend.models.db import Job, ScrapeLog, Search
 
 
-def _fake_jobspy(rows):
-    """Stand-in `jobspy` module whose scrape_jobs returns `rows`."""
-    import pandas as pd
+@pytest.fixture(autouse=True)
+def _restore_board_runner():
+    """Each board now runs in its own subprocess; these tests replace that worker, so put the real one back afterwards."""
+    import backend.scraper.sources.jobspy as J
+    real = J._scrape_board_sync
+    yield
+    J._scrape_board_sync = real
 
-    mod = types.ModuleType("jobspy")
-    mod.scrape_jobs = lambda **kwargs: pd.DataFrame(rows)
-    sys.modules["jobspy"] = mod
-    return mod
+
+def _fake_boards(rows, errors=()):
+    """Stand in for the per-board worker process: each board returns only its own rows, or the error the real worker would have captured.
+
+    The worker itself (the jobspy call, the log capture, the JSON protocol) is
+    covered in test_jobspy_board_isolation.py; what these tests are about is what
+    `_run_sync` does with each board's outcome.
+    """
+    import backend.scraper.sources.jobspy as J
+    failed = {J.board_key(board): err for board, err in errors}
+
+    def fake(board, kwargs, timeout):
+        key = J.board_key(board)
+        assert "site_name" not in kwargs, "the parent must never ask one worker for several boards"
+        return [dict(r) for r in rows if r.get("site") == key], failed.get(key)
+
+    J._scrape_board_sync = fake
 
 
 def _row(site, title, company, url):
@@ -41,7 +56,7 @@ def test_every_stored_row_is_accounted_for(test_db):
     """new_jobs + ignored_jobs == the rows the run actually inserted; two of the five postings are rejected by the title filter and stored `ignored`."""
     from backend.scraper.sources.jobspy import _run_sync
 
-    _fake_jobspy([
+    _fake_boards([
         _row("indeed", "Program Manager", "Acme", "https://indeed.test/a"),
         _row("indeed", "Delivery Manager", "Acme", "https://indeed.test/b"),
         _row("indeed", "Senior Program Manager", "Beta", "https://indeed.test/c"),
@@ -67,7 +82,7 @@ def test_filtered_rows_ride_into_the_per_board_breakdown(test_db):
     from backend.scraper.sources.jobspy import _run_sync
     from backend.scraper.orchestrator import filtered_count
 
-    _fake_jobspy([
+    _fake_boards([
         _row("indeed", "Program Manager", "Acme", "https://indeed.test/a"),
         _row("indeed", "Sales Intern", "Gamma", "https://indeed.test/e"),
         _row("linkedin", "Product Intern", "Delta", "https://linkedin.test/f"),
@@ -87,7 +102,7 @@ def test_no_filtered_key_when_nothing_was_rejected(test_db):
     from backend.scraper.sources.jobspy import _run_sync
     from backend.scraper.orchestrator import filtered_count
 
-    _fake_jobspy([_row("indeed", "Program Manager", "Acme", "https://indeed.test/a")])
+    _fake_boards([_row("indeed", "Program Manager", "Acme", "https://indeed.test/a")])
     search = _search(test_db, ["indeed"])
 
     result = _run_sync(search)
@@ -114,7 +129,7 @@ async def _run_and_summarize(test_db, monkeypatch, search):
 
 @pytest.mark.asyncio
 async def test_summary_counts_equal_the_scrape_log_counts(test_db, monkeypatch):
-    _fake_jobspy([
+    _fake_boards([
         _row("indeed", "Program Manager", "Acme", "https://indeed.test/a"),
         _row("indeed", "Delivery Manager", "Acme", "https://indeed.test/b"),
         _row("indeed", "Senior Program Manager", "Beta", "https://indeed.test/c"),
@@ -137,7 +152,7 @@ async def test_summary_counts_equal_the_scrape_log_counts(test_db, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_summary_says_nothing_about_filtering_when_there_was_none(test_db, monkeypatch):
-    _fake_jobspy([
+    _fake_boards([
         _row("indeed", "Program Manager", "Acme", "https://indeed.test/a"),
         _row("indeed", "Delivery Manager", "Acme", "https://indeed.test/b"),
     ])

@@ -1,24 +1,41 @@
-"""Profile: the candidate fact database (CRUD, verification, résumé import).
+"""Career Evidence: the Résumé Library, the candidate fact database, and the reconciliation between them.
+
+The user's job is to upload the résumés they already have, then review what was
+extracted — not to retype a dossier. Uploaded documents are `ResumeSource` rows;
+the canonical facts they support stay `CandidateFact`, linked through
+`CandidateFactSource` so every fact can say which résumés back it. Reconciliation
+and the conflict rules live in backend/copilot/evidence.py.
 
 Identity answers (contact, work authorization, preferences, EEO) stay on the
 Persona singleton and are edited through PATCH /api/persona; this router owns
 the career facts every generated claim must cite.
 """
+import json
 import logging
-import re
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from backend.copilot import evidence as EV
 from backend.copilot import facts as F
-from backend.models.db import CandidateFact, Persona, Resume, get_db, utcnow
+from backend.job_monitor import JobAlreadyRunningError, is_running, launch_background
+from backend.models.db import (CandidateFact, CandidateFactSource, FactConflict, Persona, Resume,
+                               ResumeSource, get_db, utcnow)
 
 logger = logging.getLogger("jobnavigator.profile")
 router = APIRouter(prefix="/profile", tags=["profile"])
 
+MAX_BATCH = 25   # a folder of historical résumés, not a bulk-upload endpoint
 
-def _fact_dict(f: CandidateFact) -> dict:
+# Re-exported: extraction and date parsing moved to backend/copilot/evidence.py
+# when reconciliation grew past a signature tuple, but this is where callers look.
+facts_from_resume_json = EV.facts_from_resume_json
+parse_date_range = EV.parse_date_range
+
+
+def _fact_dict(f: CandidateFact, sources: list | None = None, conflicts: int = 0) -> dict:
     return {
         "id": f.id,
         "ref": F.fact_ref(f),
@@ -28,6 +45,9 @@ def _fact_dict(f: CandidateFact) -> dict:
         "verified": bool(f.verified),
         "source": f.source,
         "sort_order": f.sort_order,
+        # which uploaded résumés support this fact ("Used in: resume-swe-2025.pdf")
+        "sources": sources or [],
+        "open_conflicts": conflicts,
         "updated_at": f.updated_at.isoformat() if f.updated_at else None,
     }
 
@@ -59,16 +79,33 @@ def _validated(kind: str, data) -> dict:
         raise HTTPException(400, str(e))
 
 
+def _provenance(db) -> tuple[dict, dict]:
+    """({fact_id: [{id, filename, locator, raw_text}]}, {fact_id: open conflict count})."""
+    names = dict(db.query(ResumeSource.id, ResumeSource.filename).all())
+    by_fact: dict = {}
+    for link in db.query(CandidateFactSource).order_by(CandidateFactSource.id).all():
+        by_fact.setdefault(link.candidate_fact_id, []).append({
+            "id": link.resume_source_id, "filename": names.get(link.resume_source_id, "?"),
+            "locator": link.locator, "raw_text": link.raw_text})
+    conflicts = dict(db.query(FactConflict.candidate_fact_id, func.count())
+                     .filter(FactConflict.status == "open").group_by(FactConflict.candidate_fact_id).all())
+    return by_fact, conflicts
+
+
 @router.get("")
 def get_profile(db: Session = Depends(get_db)):
     p = db.query(Persona).filter(Persona.id == 1).first()
     rows = db.query(CandidateFact).order_by(CandidateFact.sort_order, CandidateFact.id).all()
+    by_fact, conflicts = _provenance(db)
     return {
         "identity": {k: (getattr(p, k, None) or {}) for k in ("contact", "work_auth", "preferences", "compensation", "demographics")},
-        "facts": [_fact_dict(f) for f in rows],
+        "facts": [_fact_dict(f, by_fact.get(f.id), conflicts.get(f.id, 0)) for f in rows],
         "schema": F.schema_for_ui(),
         "profile_version": F.profile_version(db),
         "unverified": sum(1 for f in rows if not f.verified),
+        "open_conflicts": sum(conflicts.values()),
+        "resume_count": db.query(ResumeSource).count(),
+        "importing": bool(is_running(EV.IMPORT_JOB)),
     }
 
 
@@ -139,148 +176,165 @@ def verify_facts(body: dict, db: Session = Depends(get_db)):
     return {"verified": len(rows)}
 
 
-# ── import ───────────────────────────────────────────────────────────────────
-# A résumé (base Resume row, the Persona's résumé content, or a PDF) becomes
-# UNVERIFIED facts. Nothing imported is cited until the user verifies it, and an
-# import never overwrites an existing fact or a contact answer already set.
-
-_MONTHS = {m: i for i, m in enumerate(("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"), 1)}
-_PART_RE = re.compile(r"(?:([a-z]{3})[a-z]*\.?\s+)?((?:19|20)\d{2})|(present|current|now)", re.I)
-_RANGE_SPLIT_RE = re.compile(r"\s*(?:[–—−]|\s-\s|-(?=\s*[A-Za-z]{3}|\s*(?:19|20)\d{2})|\bto\b)\s*")
 
 
-def _one_date(text: str) -> str:
-    m = _PART_RE.search(text or "")
-    if not m:
-        return ""
-    if m.group(3):
-        return "present"
-    mon = _MONTHS.get((m.group(1) or "").lower()[:3])
-    return f"{m.group(2)}-{mon:02d}" if mon else m.group(2)
+# ── Résumé Library ───────────────────────────────────────────────────────────
+# Onboarding is "upload the résumés you already have", not "fill in a dossier":
+#   upload many PDFs -> extract claims from each -> reconcile -> review conflicts
+#   -> verified Career Evidence -> role-family and job-specific résumés.
+# Extraction and reconciliation live in backend/copilot/evidence.py; nothing an
+# import produces is cited by a generated résumé until the user verifies it.
+
+def _source_dict(s: ResumeSource, facts: int = 0, conflicts: int = 0) -> dict:
+    return {
+        "id": s.id, "filename": s.filename, "sha256": s.sha256, "status": s.status, "error": s.error,
+        "uploaded_at": s.uploaded_at.isoformat() if s.uploaded_at else None,
+        "imported_at": s.imported_at.isoformat() if s.imported_at else None,
+        "result": s.result or {}, "facts": facts, "conflicts": conflicts,
+    }
 
 
-def parse_date_range(text: str) -> tuple[str, str]:
-    """'May 2021 – Present' -> ('2021-05', 'present'); anything unparseable -> ''."""
-    parts = [p for p in _RANGE_SPLIT_RE.split(str(text or "").strip()) if p]
-    if not parts:
-        return "", ""
-    start = _one_date(parts[0])
-    end = _one_date(parts[-1]) if len(parts) > 1 else ""
-    return start, end
+def _conflict_dict(c: FactConflict, fact: CandidateFact | None, filename: str | None) -> dict:
+    return {
+        "id": c.id, "fact_id": c.candidate_fact_id, "field": c.field,
+        "current_value": c.current_value, "proposed_value": c.proposed_value,
+        "status": c.status, "resolved_value": c.resolved_value,
+        "from_resume": filename,
+        "kind": fact.kind if fact else None,
+        "headline": F.fact_headline(fact.kind, fact.data or {}) if fact else "",
+        "created_at": c.created_at.isoformat() if c.created_at else None,
+    }
 
 
-def _split_list(v) -> list[str]:
-    if isinstance(v, list):
-        return [str(x).strip() for x in v if str(x).strip()]
-    return [x.strip() for x in re.split(r"[,;•|]", str(v or "")) if x.strip()]
+@router.get("/resumes")
+def list_resume_sources(db: Session = Depends(get_db)):
+    """The Résumé Library: every uploaded document, its import status and what it produced."""
+    sources = db.query(ResumeSource).order_by(ResumeSource.uploaded_at.desc(), ResumeSource.id.desc()).all()
+    facts = dict(db.query(CandidateFactSource.resume_source_id, func.count())
+                 .group_by(CandidateFactSource.resume_source_id).all())
+    conflicts = dict(db.query(FactConflict.resume_source_id, func.count())
+                     .filter(FactConflict.status == "open").group_by(FactConflict.resume_source_id).all())
+    return {
+        "sources": [_source_dict(s, facts.get(s.id, 0), conflicts.get(s.id, 0)) for s in sources],
+        "importing": bool(is_running(EV.IMPORT_JOB)),
+        "open_conflicts": db.query(FactConflict).filter(FactConflict.status == "open").count(),
+    }
 
 
-def facts_from_resume_json(json_data: dict) -> list[dict]:
-    """Résumé json_data -> [{kind, data, children:[...]}]; pure, so it is tested without a DB."""
-    out = []
-    for e in (json_data or {}).get("experience") or []:
-        if not isinstance(e, dict) or not (e.get("company") or e.get("title")):
-            continue
-        start, end = parse_date_range(e.get("date") or e.get("dates") or "")
-        title = str(e.get("title") or "").strip() or "Role"
-        out.append({
-            "kind": "internship" if "intern" in title.lower() else "experience",
-            "data": {"employer": str(e.get("company") or "").strip() or "Unknown", "title": title,
-                     "location": str(e.get("location") or ""), "start_date": start, "end_date": end,
-                     "description": str(e.get("description") or ""),
-                     "notes": "" if start else f"Imported date: {e.get('date') or ''}".strip(": ")},
-            "children": [{"kind": "achievement", "data": {"text": str(b).strip()}}
-                         for b in e.get("bullets") or [] if str(b).strip()],
-        })
-    for ed in (json_data or {}).get("education") or []:
-        if not isinstance(ed, dict) or not ed.get("school"):
-            continue
-        _, grad = parse_date_range(ed.get("years") or ed.get("year") or "")
-        if not grad:
-            grad = _one_date(str(ed.get("years") or ed.get("year") or ""))
-        out.append({"kind": "education", "data": {
-            "institution": str(ed["school"]).strip(), "degree": str(ed.get("degree") or ""),
-            "location": str(ed.get("location") or ""), "graduation_date": grad if grad != "present" else ""}})
-    for pr in (json_data or {}).get("projects") or []:
-        if not isinstance(pr, dict) or not pr.get("name"):
-            continue
-        out.append({"kind": "project",
-                    "data": {"name": str(pr["name"]).strip(), "description": str(pr.get("description") or "")},
-                    "children": [{"kind": "achievement", "data": {"text": str(b).strip()}}
-                                 for b in pr.get("bullets") or [] if str(b).strip()]})
-    skills = (json_data or {}).get("skills") or {}
-    groups = skills.items() if isinstance(skills, dict) else [("", skills)]
-    for category, items in groups:
-        for name in _split_list(items):
-            out.append({"kind": "skill", "data": {"name": name, "category": str(category or "")}})
-    for pub in (json_data or {}).get("publications") or []:
-        if isinstance(pub, dict) and pub.get("title"):
-            out.append({"kind": "publication", "data": {"title": str(pub["title"]).strip(),
-                                                         "venue": str(pub.get("description") or pub.get("venue") or "")}})
-    return out
+@router.post("/resumes", status_code=202)
+async def upload_resume_sources(files: list[UploadFile] = File(...), db: Session = Depends(get_db)):
+    """Drop in several historical résumés at once.
 
+    Text is extracted here (offline, fast) so the PDF bytes need not be kept; the
+    LLM structuring and the reconciliation run in one background job over every
+    pending document, because that is N provider calls and must not hold a request
+    open. A file already in the library is reported, not imported twice — sha256
+    is what makes re-dropping a folder harmless.
+    """
+    from backend.api.routes_resumes import check_pdf_name, check_pdf_size, extract_pdf_text
+    if not files:
+        raise HTTPException(400, "choose at least one PDF")
+    if len(files) > MAX_BATCH:
+        raise HTTPException(400, f"upload at most {MAX_BATCH} résumés at a time")
 
-def _signature(kind: str, data: dict) -> tuple:
-    key = {"experience": ("employer", "title"), "internship": ("employer", "title"), "education": ("institution", "degree"),
-           "project": ("name",), "skill": ("name",), "publication": ("title",), "achievement": ("text",)}.get(kind, ())
-    return (kind,) + tuple(str(data.get(k) or "").strip().lower() for k in key)
-
-
-def store_imported(db, items: list[dict], label: str) -> dict:
-    existing = {_signature(f.kind, f.data or {}): f for f in db.query(CandidateFact).all()}
-    created = skipped = 0
-
-    def add(item, parent_id=None):
-        nonlocal created, skipped
+    accepted, skipped, rejected = [], [], []
+    for upload in files:
+        name = getattr(upload, "filename", "") or "resume.pdf"
         try:
-            data = F.validate_data(item["kind"], item["data"])
-        except ValueError as e:
-            logger.info(f"profile import: dropped {item['kind']}: {e}")
-            skipped += 1
-            return None
-        sig = _signature(item["kind"], data)
-        if sig in existing:
-            skipped += 1
-            return existing[sig]
-        row = CandidateFact(kind=item["kind"], parent_id=parent_id, data=data, verified=False, source=f"import:{label}"[:200])
-        db.add(row)
-        db.flush()
-        existing[sig] = row
-        created += 1
-        return row
+            check_pdf_name(name)
+            pdf = await upload.read()
+            check_pdf_size(pdf)
+            sha = EV.digest(pdf)
+            existing = db.query(ResumeSource).filter(ResumeSource.sha256 == sha).first()
+            if existing is not None:
+                skipped.append({"filename": name, "reason": f"already in the library as {existing.filename}",
+                                "id": existing.id})
+                continue
+            row = ResumeSource(filename=name[:255], sha256=sha, status="pending",
+                               parsed_text=extract_pdf_text(pdf))
+            db.add(row)
+            db.flush()
+            accepted.append(_source_dict(row))
+        except HTTPException as e:
+            rejected.append({"filename": name, "reason": str(e.detail)})
+        except Exception as e:                     # one unreadable file must not lose the batch
+            logger.warning(f"résumé upload {name!r} rejected: {e}")
+            rejected.append({"filename": name, "reason": str(e)[:200]})
+    db.commit()
 
-    for item in items:
-        parent = add(item)
-        for child in item.get("children") or []:
-            if parent is not None:
-                add(child, parent.id)
-    return {"created": created, "skipped": skipped}
+    run_id = None
+    if accepted:
+        try:
+            run_id = launch_background(EV.IMPORT_JOB, EV.import_pending, trigger="manual")
+        except JobAlreadyRunningError:
+            pass   # the running job picks up everything still pending, including these
+    return {"accepted": accepted, "skipped": skipped, "rejected": rejected,
+            "run_id": run_id, "importing": bool(accepted) or bool(is_running(EV.IMPORT_JOB))}
 
 
-def _fill_contact(p: Persona, header: dict) -> int:
-    """Contact answers the résumé header gives, only where the Persona has none yet."""
-    from backend.api.routes_persona import _contact_from_header
-    contact = dict(p.contact or {})
-    added = 0
-    for k, v in _contact_from_header(header or {}).items():
-        if v and not contact.get(k):
-            contact[k] = v
-            added += 1
-    if added:
-        p.contact = contact
-    return added
+@router.delete("/resumes/{source_id}")
+def delete_resume_source(source_id: int, db: Session = Depends(get_db)):
+    """Forget a source document. The facts it supported stay — other résumés may support them too."""
+    row = db.get(ResumeSource, source_id)
+    if not row:
+        raise HTTPException(404, "résumé source not found")
+    db.delete(row)
+    db.commit()
+    return {"deleted": source_id}
 
+
+@router.get("/conflicts")
+def list_conflicts(status: str = "open", db: Session = Depends(get_db)):
+    """Fields two résumés state differently. The user picks the canonical value; no model does."""
+    q = db.query(FactConflict)
+    if status in ("open", "resolved"):
+        q = q.filter(FactConflict.status == status)
+    rows = q.order_by(FactConflict.id).all()
+    facts = {f.id: f for f in db.query(CandidateFact).filter(
+        CandidateFact.id.in_([c.candidate_fact_id for c in rows])).all()} if rows else {}
+    names = dict(db.query(ResumeSource.id, ResumeSource.filename).all())
+    return [_conflict_dict(c, facts.get(c.candidate_fact_id), names.get(c.resume_source_id)) for c in rows]
+
+
+@router.post("/conflicts/{conflict_id}/resolve")
+def resolve_conflict(conflict_id: int, body: dict, db: Session = Depends(get_db)):
+    """Choose `current`, `proposed`, or type a value of your own."""
+    c = db.get(FactConflict, conflict_id)
+    if not c:
+        raise HTTPException(404, "conflict not found")
+    if c.status != "open":
+        raise HTTPException(409, "this conflict is already resolved")
+    choice = str(body.get("choice") or "").strip()
+    value = body.get("value")
+    if choice == "current":
+        value = c.current_value
+    elif choice == "proposed":
+        value = c.proposed_value
+    elif not isinstance(value, str):
+        raise HTTPException(400, "send choice=current, choice=proposed, or a value")
+    try:
+        fact = EV.resolve_conflict(db, c, value)
+    except LookupError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    db.commit()
+    return {"conflict_id": c.id, "field": c.field, "value": value, "fact": _fact_dict(fact)}
+
+
+# ── single-document import (Persona content, a base Résumé row, or one PDF) ───
+# The same reconciliation as the library: one code path decides what is a
+# duplicate, what is new evidence and what is a conflict.
 
 @router.post("/import")
 async def import_profile(request: Request, file: Optional[UploadFile] = File(None), db: Session = Depends(get_db)):
     """Import a PDF, a base résumé (`resume_id`) or the Persona's résumé content (`{"source": "persona"}`) as unverified facts."""
-    p = db.query(Persona).filter(Persona.id == 1).first()
     if file is not None and getattr(file, "filename", None):
         from backend.api.routes_resumes import check_pdf_name, check_pdf_size, parse_resume_pdf
         check_pdf_name(file.filename)
         pdf = await file.read()
         check_pdf_size(pdf)
-        json_data, label = await parse_resume_pdf(pdf, db), file.filename
+        json_data, label, sha = await parse_resume_pdf(pdf, db), file.filename, EV.digest(pdf)
     else:
         try:
             body = await request.json()
@@ -288,6 +342,7 @@ async def import_profile(request: Request, file: Optional[UploadFile] = File(Non
             body = {}
         body = body if isinstance(body, dict) else {}
         if body.get("source") == "persona":
+            p = db.query(Persona).filter(Persona.id == 1).first()
             json_data, label = (p.resume_content if p else None) or {}, "persona"
         elif body.get("resume_id"):
             r = db.query(Resume).filter(Resume.id == str(body["resume_id"])).first()
@@ -296,9 +351,19 @@ async def import_profile(request: Request, file: Optional[UploadFile] = File(Non
             json_data, label = r.json_data or {}, r.name
         else:
             raise HTTPException(400, "Upload a PDF, or send resume_id or source=persona")
+        sha = EV.digest(json.dumps(json_data, sort_keys=True, default=str).encode())
 
-    result = store_imported(db, facts_from_resume_json(json_data), label)
-    if p is not None:
-        result["contact_filled"] = _fill_contact(p, json_data.get("header") or {})
+    source = db.query(ResumeSource).filter(ResumeSource.sha256 == sha).first()
+    if source is None:
+        source = ResumeSource(filename=str(label)[:255], sha256=sha, status="imported",
+                              parsed_json=json_data, imported_at=utcnow())
+        db.add(source)
+        db.flush()
+    tally = EV.reconcile(db, EV.facts_from_resume_json(json_data), source)
+    source.result, source.status, source.imported_at = tally, "imported", utcnow()
+    result = {**tally, "created": tally[EV.Outcome.NOVEL],
+              "skipped": tally[EV.Outcome.DUPLICATE] + tally["dropped"],
+              "source_id": source.id}
+    result["contact_filled"] = EV._fill_contact(db, (json_data or {}).get("header") or {})
     db.commit()
     return result

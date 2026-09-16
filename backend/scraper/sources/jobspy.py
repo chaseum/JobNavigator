@@ -1,10 +1,23 @@
-"""JobSpy-backed keyword search source — searches LinkedIn, Indeed, ZipRecruiter, Google Jobs via a single multi-board request."""
+"""JobSpy-backed keyword search source — LinkedIn, Indeed, ZipRecruiter and Google Jobs, one killable subprocess per board.
+
+One `scrape_jobs(site_name=[...])` call for every board gives JobNavigator no kill
+boundary: python-jobspy 1.1.82 can hang paginating Indeed, and a wedged thread
+cannot be killed from the event loop, so one stuck board stranded the whole
+search. Each board now runs as `python -m backend.scraper.sources.jobspy` (see
+`_worker_main` at the foot of this file), reached through `subprocess.run(timeout=)`
+which kills the child when it overruns. A board that hangs, crashes or 403s costs
+that board only; the rows every other board returned are still stored.
+"""
 import asyncio
 import json
 import logging
 import math
+import os
 import re
+import subprocess
+import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
@@ -177,6 +190,67 @@ def _merge_source_errors(breakdown: dict, errors: dict) -> dict:
     return breakdown
 
 
+# ── per-board isolation ──────────────────────────────────────────────────────
+
+DEFAULT_BOARD_TIMEOUT = 150.0
+# jobspy's own site spelling, so a board's error and its `seen` count land on the
+# same breakdown key ("ziprecruiter" is configured, but rows come back as "zip_recruiter").
+def board_key(board: str) -> str:
+    flat = str(board or "").lower().replace("_", "").replace("-", "")
+    return _JOBSPY_SITE_KEYS.get(flat, str(board or "").lower())
+
+
+def board_timeout(db) -> float:
+    """Seconds one board may run before it is killed. Setting `jobspy_board_timeout`."""
+    try:
+        value = float(get_setting_value(db, "jobspy_board_timeout", "") or DEFAULT_BOARD_TIMEOUT)
+    except (TypeError, ValueError):
+        return DEFAULT_BOARD_TIMEOUT
+    return value if value > 0 else DEFAULT_BOARD_TIMEOUT
+
+
+def _scrape_board_sync(board: str, kwargs: dict, timeout: float) -> tuple[list, str | None]:
+    """(rows, error) for one board, run in a subprocess that is killed if it overruns."""
+    payload = json.dumps({"board": board, "kwargs": kwargs})
+    # backend/scraper/sources/jobspy.py -> the repo root, so `-m backend...` resolves in the child
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(p for p in (root, os.environ.get("PYTHONPATH", "")) if p)}
+    try:
+        proc = subprocess.run([sys.executable, "-m", __name__], input=payload.encode(),
+                              capture_output=True, timeout=timeout, env=env)
+    except subprocess.TimeoutExpired:
+        # subprocess.run has already killed the child; a wedged board stops here
+        logger.warning(f"JobSpy board {board} timed out after {timeout:.0f}s and was killed")
+        return [], f"timed out after {int(timeout)}s"
+    except Exception as e:
+        return [], _condense_error(f"worker failed: {e}")
+    if proc.returncode != 0:
+        tail = " ".join(proc.stderr.decode(errors="replace").split())[-200:]
+        return [], _condense_error(tail or f"worker exited {proc.returncode}")
+    try:
+        out = json.loads(proc.stdout.decode(errors="replace") or "{}")
+    except ValueError:
+        return [], "worker returned no usable result"
+    return out.get("rows") or [], out.get("error")
+
+
+def scrape_boards(boards: list, kwargs: dict, timeout: float) -> tuple[list, dict]:
+    """(all rows, {board_key: error}) with every board run independently and concurrently.
+
+    Threads, not the event loop: each one only waits on its own subprocess, and
+    `_run_sync` is plain synchronous code that a caller may already be running
+    inside a loop (asyncio.run would raise there).
+    """
+    with ThreadPoolExecutor(max_workers=max(1, len(boards))) as pool:
+        results = list(pool.map(lambda b: _scrape_board_sync(b, kwargs, timeout), boards))
+    rows, errors = [], {}
+    for board, (board_rows, error) in zip(boards, results):
+        rows.extend(board_rows)
+        if error:
+            errors[board_key(board)] = error
+    return rows, errors
+
+
 def get_setting_value(db: Session, key: str, default: str = "") -> str:
     """Read a single Setting row's value by key, returning ``default`` if not set."""
     row = db.query(Setting).filter(Setting.key == key).first()
@@ -219,17 +293,16 @@ def _run_sync(search, proxy_url: str = None) -> dict:
     breakdown = {}
 
     try:
-        from jobspy import scrape_jobs
+        import pandas as pd
 
         # Build source list — filter out 'direct' which is Playwright
         sources = [s for s in (search.sources or []) if s != "direct"]
         if not sources:
             return {"jobs_found": 0, "new_jobs": 0, "ignored_jobs": 0,
                     "error": "No JobSpy sources configured", "source_breakdown": {}}
-        breakdown = {s: {"seen": 0, "new": 0} for s in sources}
+        breakdown = {board_key(s): {"seen": 0, "new": 0} for s in sources}
 
         kwargs = {
-            "site_name": sources,
             "search_term": search.search_term or "",
             "location": search.location or "United States",
             "results_wanted": search.results_wanted or 50,
@@ -245,10 +318,17 @@ def _run_sync(search, proxy_url: str = None) -> dict:
         if proxy_url:
             kwargs["proxies"] = [proxy_url]
 
-        logger.info(f"Running JobSpy search: {search.name} — term='{search.search_term}', sources={sources}")
-        with _capture_source_errors(sources) as capture:
-            jobs_df = scrape_jobs(**kwargs)
-        _merge_source_errors(breakdown, capture.errors)
+        db_timeout = SessionLocal()
+        try:
+            timeout = board_timeout(db_timeout)
+        finally:
+            db_timeout.close()
+
+        logger.info(f"Running JobSpy search: {search.name} — term='{search.search_term}', sources={sources} "
+                    f"(one subprocess per board, {timeout:.0f}s each)")
+        rows, board_errors = scrape_boards(sources, kwargs, timeout)
+        _merge_source_errors(breakdown, board_errors)
+        jobs_df = pd.DataFrame(rows) if rows else None
 
         if jobs_df is None or jobs_df.empty:
             duration = time.time() - start_time
@@ -487,3 +567,34 @@ def _run_sync(search, proxy_url: str = None) -> dict:
 async def run(search, proxy_url: str = None) -> dict:
     """Async entry point — offloads the synchronous JobSpy call to a thread."""
     return await asyncio.to_thread(_run_sync, search, proxy_url)
+
+
+# ── the board worker (`python -m backend.scraper.sources.jobspy`) ────────────
+# Runs ONE board and writes {"rows": [...], "error": ...} to stdout. It is a
+# separate process so the parent can kill it; nothing here touches the database.
+
+def _worker_main() -> int:
+    request = json.loads(sys.stdin.read() or "{}")
+    board = request.get("board") or ""
+    kwargs = {**(request.get("kwargs") or {}), "site_name": [board]}
+    rows, error = [], None
+    try:
+        from jobspy import scrape_jobs
+        with _capture_source_errors([board]) as capture:
+            df = scrape_jobs(**kwargs)
+        # jobspy swallows a hard board failure into its own logger, so "no rows"
+        # and "403" look identical in the return value; the capture tells them apart.
+        error = capture.errors.get(board_key(board)) or next(iter(capture.errors.values()), None)
+        if df is not None and not df.empty:
+            rows = [{k: _clean(v) for k, v in record.items()} for record in df.to_dict("records")]
+            for r in rows:
+                r.setdefault("site", board_key(board))
+    except Exception as e:
+        error = _condense_error(f"{type(e).__name__}: {e}")
+    sys.stdout.write(json.dumps({"rows": rows, "error": error}))
+    sys.stdout.flush()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_worker_main())

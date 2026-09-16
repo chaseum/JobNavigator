@@ -1235,8 +1235,12 @@ def check_pdf_size(pdf_bytes: bytes) -> None:
         raise HTTPException(status_code=400, detail="PDF too large (max 10 MB)")
 
 
-async def parse_resume_pdf(pdf_bytes: bytes, db: Session) -> dict:
-    """PDF bytes → structured résumé json_data via pdfplumber and a schema-constrained LLM call."""
+def extract_pdf_text(pdf_bytes: bytes) -> str:
+    """PDF bytes → plain text via pdfplumber. 422 when there is too little to parse.
+
+    Split out from the LLM step so a batch upload can keep the text (cheap, offline,
+    no provider involved) and structure it later, without holding on to the PDF bytes.
+    """
     extracted_text = ""
     try:
         import pdfplumber
@@ -1250,7 +1254,16 @@ async def parse_resume_pdf(pdf_bytes: bytes, db: Session) -> dict:
 
     if len(extracted_text.strip()) < 50:
         raise HTTPException(status_code=422, detail="Could not extract enough text from PDF. It may be image-based.")
+    return extracted_text
 
+
+async def parse_resume_pdf(pdf_bytes: bytes, db: Session) -> dict:
+    """PDF bytes → structured résumé json_data via pdfplumber and a schema-constrained LLM call."""
+    return await parse_resume_text(extract_pdf_text(pdf_bytes), db)
+
+
+async def parse_resume_text(extracted_text: str, db: Session) -> dict:
+    """Résumé text → structured json_data. The one LLM step in an import."""
     system_prompt = (
         "You are a resume parser. Extract only facts explicitly present in the resume. "
         "Do not infer or invent missing values. Use empty strings, arrays, and mappings "

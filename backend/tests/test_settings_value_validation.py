@@ -41,6 +41,7 @@ def test_int_keys_match_the_rows_settings_marks_int():
         "autofill_default_length",
         "role_match_min_recommended",
         "resume_page_target",
+        "jobspy_board_timeout",
     }
 
 

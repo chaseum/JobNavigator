@@ -11,6 +11,7 @@ import re
 
 from backend.analyzer.llm_client import call_structured
 from backend.copilot import facts as F
+from backend.copilot import latex
 from backend.copilot.schemas import BulletRewrites, ResumeAudit, ResumePlan
 
 logger = logging.getLogger("jobnavigator.copilot.resume")
@@ -131,7 +132,7 @@ def header_from(persona) -> dict:
 
 
 def build_resume(ix: FactIndex, persona, bullets_by_entry: dict, project_refs: list, skill_refs: list,
-                 section_order=None, template="default") -> dict:
+                 section_order=None, template=latex.DEFAULT_TEMPLATE) -> dict:
     """Structured résumé JSON. Bullet ids are "<entry ref>:<n>"; entries not in bullets_by_entry keep their base bullets."""
     def entry(f, bullets):
         ref = F.fact_ref(f)
@@ -178,11 +179,41 @@ def recent_projects(ix: FactIndex, n=3) -> list[str]:
     return [F.fact_ref(f) for f in sorted(ix.of_kind("project"), key=_recency, reverse=True)[:n]]
 
 
-def build_base(ix: FactIndex, persona, section_order=None, template="default") -> dict:
-    """All verified facts, verbatim, up to five bullets an entry and the three most recent projects."""
-    bullets = {F.fact_ref(f): base_bullets(ix, F.fact_ref(f), 5) for f in ix.of_kind("experience", "internship", "research", "project")}
-    skills = [F.fact_ref(s) for s in ix.of_kind("skill")]
-    return build_resume(ix, persona, bullets, recent_projects(ix), skills, section_order, template)
+def build_base(ix: FactIndex, persona, section_order=None, template=latex.DEFAULT_TEMPLATE, family=None) -> dict:
+    """All verified facts, verbatim, up to five bullets an entry and the three most recent projects.
+
+    With a `family` (backend/copilot/role_families.py) the same facts are kept but
+    ordered for that role: the bullets, projects and skills the evidence itself
+    supports for that kind of work lead. It is a selection over one truth, so every
+    claim is still a fact's own words and still carries its provenance id — the
+    family vocabulary decides what is shown, never what is said.
+    """
+    from backend.copilot.role_families import relevance
+
+    def rank(items, text_of):
+        """Most relevant first, ties in the original order; unchanged when there is no family."""
+        if family is None:
+            return list(items)
+        return [x for _, _, x in sorted(((-relevance(family, text_of(x)), i, x) for i, x in enumerate(items)),
+                                        key=lambda t: t[:2])]
+
+    bullets = {}
+    for f in ix.of_kind("experience", "internship", "research", "project"):
+        ref = F.fact_ref(f)
+        head = F.fact_headline(f.kind, f.data or {})
+        bullets[ref] = rank(base_bullets(ix, ref), lambda b: f"{head} {b['text']}")[:5]
+
+    projects = recent_projects(ix)
+    if family is not None:
+        ordered = rank(sorted(ix.of_kind("project"), key=_recency, reverse=True),
+                       lambda p: F.fact_text(p.kind, p.data or {}))
+        projects = [F.fact_ref(p) for p in ordered[:3]]
+    skills = [F.fact_ref(s) for s in rank(ix.of_kind("skill"), lambda s: F.fact_text(s.kind, s.data or {}))]
+
+    resume = build_resume(ix, persona, bullets, projects, skills, section_order, template)
+    if family is not None:
+        resume["role_family"] = family["id"]
+    return resume
 
 
 # ── deterministic claim checks ───────────────────────────────────────────────
@@ -335,7 +366,19 @@ Rules:
 - reason: one short sentence on what you changed and why."""
 
 
-def validate_plan(plan: ResumePlan, ix: FactIndex, base_projects: list, policy: str, max_bullets: int):
+def section_refs(resume: dict, section_id: str) -> list[str]:
+    """The fact ids a built résumé shows in one section — how a tailored draft inherits its base's selection."""
+    for s in (resume or {}).get("sections") or []:
+        if s.get("id") != section_id:
+            continue
+        if section_id == "skills":
+            return [r for line in s.get("lines") or [] for r in line.get("source_fact_ids") or []]
+        return [e["fact_id"] for e in s.get("entries") or [] if e.get("fact_id")]
+    return []
+
+
+def validate_plan(plan: ResumePlan, ix: FactIndex, base_projects: list, policy: str, max_bullets: int,
+                  skill_order: list | None = None):
     """(bullet groups by entry, project refs, skill refs, notes, planned refs) keeping only what the facts allow.
 
     `planned` are the entries the plan chose to write; every other entry keeps its facts' own words.
@@ -371,7 +414,11 @@ def validate_plan(plan: ResumePlan, ix: FactIndex, base_projects: list, policy: 
             groups[ref] = [b["source_fact_ids"] for b in base_bullets(ix, ref, max_bullets)]
 
     skills = [s for s in dict.fromkeys(plan.skill_ids) if s in ix.by_ref and ix.by_ref[s].kind == "skill"]
-    skills += [F.fact_ref(s) for s in ix.of_kind("skill") if F.fact_ref(s) not in skills]
+    # everything the plan did not name still shows, in the base résumé's order when
+    # there is one — that is how a family base's skill selection reaches the draft
+    rest = [r for r in (skill_order or []) if r in ix.by_ref and ix.by_ref[r].kind == "skill"]
+    rest += [F.fact_ref(s) for s in ix.of_kind("skill") if F.fact_ref(s) not in rest]
+    skills += [r for r in dict.fromkeys(rest) if r not in skills]
     planned = {pe.fact_id for pe in plan.entries if groups.get(pe.fact_id)}
     return groups, projects, skills, notes, planned
 
@@ -465,14 +512,22 @@ async def rewrite_entry(ix: FactIndex, ref: str, groups: list, requirements: lis
     return bullets, provider, model
 
 
-async def tailor(ix: FactIndex, persona, analysis: dict, evidence: list, settings: dict, job_id=None, gaps=None):
-    """(resume_json, audit, provider, model) for one job; `gaps` are the base résumé's SAFE_TO_ADD / SAFE_TO_REPHRASE rows."""
+async def tailor(ix: FactIndex, persona, analysis: dict, evidence: list, settings: dict, job_id=None, gaps=None,
+                 base_resume: dict | None = None, role_family: str | None = None):
+    """(resume_json, audit, provider, model) for one job; `gaps` are the base résumé's SAFE_TO_ADD / SAFE_TO_REPHRASE rows.
+
+    `base_resume` is the role-family base this draft derives from: its project and
+    skill selection is what tailoring starts from, so a PM application is tailored
+    out of the PM selection rather than out of a universal résumé.
+    """
     reqs = analysis.get("requirements") or []
     ev_by = {e["requirement_id"]: e for e in evidence or []}
     evidence_text = "\n".join(
         f"{r['id']} [{(ev_by.get(r['id']) or {}).get('status', 'UNKNOWN')}] {r['text']} <- "
         f"{', '.join((ev_by.get(r['id']) or {}).get('source_fact_ids') or []) or 'nothing'}" for r in reqs)
-    base_projects = recent_projects(ix)
+    # the base this draft derives from decides which projects and skills it starts with
+    base_projects = [r for r in section_refs(base_resume or {}, "projects") if r in ix.by_ref] or recent_projects(ix)
+    base_skills = [r for r in section_refs(base_resume or {}, "skills") if r in ix.by_ref]
     policy = settings.get("project_policy", "reorder")
     project_rule = {
         "keep": f"Show exactly these projects: {', '.join(base_projects) or 'none'}.",
@@ -487,7 +542,7 @@ async def tailor(ix: FactIndex, persona, analysis: dict, evidence: list, setting
         .replace("<<GAPS>>", "\n".join(f"{g['requirement_id']} {g['gap']}: {g['requirement']} <- {', '.join(g.get('profile_evidence') or []) or 'nothing'}"
                                        for g in gaps or []) or "(none)"),
         PLAN_SYSTEM, feature="copilot", max_tokens=3000, job_id=job_id)
-    groups, projects, skills, notes, planned = validate_plan(plan, ix, base_projects, policy, max_bullets)
+    groups, projects, skills, notes, planned = validate_plan(plan, ix, base_projects, policy, max_bullets, base_skills)
     notes += surface_gaps(ix, groups, projects, gaps, evidence, policy, max_bullets)
     if settings.get("skill_ordering") == "profile":
         order = {F.fact_ref(s): i for i, s in enumerate(ix.of_kind("skill"))}
@@ -502,7 +557,9 @@ async def tailor(ix: FactIndex, persona, analysis: dict, evidence: list, setting
             bullets_by_entry[ref] = [{"text": original_text(ix, grp), "source_fact_ids": grp, "planned_sources": grp,
                                       "requirement_ids": [], "reason": "unchanged", "original": original_text(ix, grp)}
                                      for grp in g]
-    resume = build_resume(ix, persona, bullets_by_entry, projects, skills, settings.get("section_order"), settings.get("template", "default"))
+    resume = build_resume(ix, persona, bullets_by_entry, projects, skills, settings.get("section_order"), settings.get("template", latex.DEFAULT_TEMPLATE))
     resume["plan_notes"] = notes
+    if role_family:
+        resume["role_family"] = role_family
     audit = await audit_resume(resume, ix, analysis.get("technologies") or [], analysis.get("domain_terms") or [], True, job_id)
     return resume, audit, provider, model

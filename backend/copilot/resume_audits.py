@@ -23,11 +23,23 @@ def claims_of(v: ResumeVersion) -> dict:
     return {c["bullet_id"]: c for c in (v.audit or {}).get("claims") or []}
 
 
-def base_version(db):
-    """The résumé a job is first audited against: the newest accepted base, else the newest base draft."""
-    q = db.query(ResumeVersion).filter(ResumeVersion.kind == "base", ResumeVersion.status != "rejected")
-    return (q.filter(ResumeVersion.status == "accepted").order_by(ResumeVersion.accepted_at.desc()).first()
-            or q.order_by(ResumeVersion.created_at.desc()).first())
+def base_version(db, role_family: str | None = None):
+    """The résumé a job is first audited against: the newest accepted base, else the newest base draft.
+
+    With a role family, its own base is preferred — a PM application should be
+    measured against, and tailored from, the PM selection — and the universal base
+    is the fallback when that family has no base yet.
+    """
+    def newest(q):
+        return (q.filter(ResumeVersion.status == "accepted").order_by(ResumeVersion.accepted_at.desc()).first()
+                or q.order_by(ResumeVersion.created_at.desc()).first())
+
+    base = db.query(ResumeVersion).filter(ResumeVersion.kind == "base", ResumeVersion.status != "rejected")
+    if role_family:
+        found = newest(base.filter(ResumeVersion.role_family == role_family))
+        if found is not None:
+            return found
+    return newest(base)
 
 
 def tailored_version(db, job_id):

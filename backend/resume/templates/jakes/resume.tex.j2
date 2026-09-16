@@ -1,0 +1,56 @@
+((= Jake's Resume, parameterised. Rendered by backend/copilot/latex.py.
+    Delimiters: ((* block *)), ((( variable ))). Every variable is LaTeX-escaped;
+    the macros and the visual structure are Jake Gutierrez's (see SOURCE.md). =))
+\documentclass[letterpaper,11pt]{article}
+\input{macros}
+((= The only addition to Jake's preamble. Upstream leaves the font encoding at OT1,
+    where \_ has no ToUnicode mapping and "in/ada_l" comes back out of the PDF as
+    "in/ada l" — a parser then reads the wrong link. T1 + Latin Modern (metrically
+    the same Computer Modern outlines Jake's design uses) keeps the layout and makes
+    the text extractable, which is what \pdfgentounicode is there for. =))
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+
+\begin{document}
+
+%----------HEADING----------
+\begin{center}
+    \textbf{\Huge \scshape ((( header.name )))} \\ \vspace{1pt}
+    \small ((* for c in header.contact *))((* if not loop.first *)) $|$ ((* endif *))((* if c.url *))\href{((( c.url|url )))}{\underline{((( c.text )))}}((* else *))((( c.text )))((* endif *))((* endfor *))
+\end{center}
+((* for s in sections *))
+
+\section{((( s.title )))}
+((* if s.lines is defined *))
+ \begin{itemize}[leftmargin=0.15in, label={}]
+    \small{\item{
+((* for line in s.lines *))
+     \textbf{((( line.label )))}{: ((( line["items"]|join(", ") )))}((* if not loop.last *)) \\((* endif *))
+
+((* endfor *))
+    }}
+ \end{itemize}
+((* else *))
+  \resumeSubHeadingListStart
+((* for e in s.entries *))
+((* if s.id == "projects" *))
+    \resumeProjectHeading
+      {\textbf{((( e.heading )))}((* if e.subheading *)) $|$ \emph{((( e.subheading )))}((* endif *))}{((( e.date )))}
+((* else *))
+    \resumeSubheading
+      {((( e.heading )))}{((( e.date )))}
+      {((( e.subheading )))}{((( e.location )))}
+((* endif *))
+((* if e.bullets *))
+      \resumeItemListStart
+((* for b in e.bullets *))
+        \resumeItem{((( b.text )))}
+((* endfor *))
+      \resumeItemListEnd
+((* endif *))
+((* endfor *))
+  \resumeSubHeadingListEnd
+((* endif *))
+((* endfor *))
+
+\end{document}

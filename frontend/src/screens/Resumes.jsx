@@ -23,6 +23,41 @@ const statusOf = (r) => (r.status === 'accepted' ? ['good', 'Accepted'] : r.stat
 const COLS = [['Resume', '38%'], ['Target Job Title', '28%'], ['Last Modified', '14%'], ['Created', '14%'], ['', '56px']]
 const CELL = { padding: '12px 16px', borderBottom: '1px solid var(--line-soft)', verticalAlign: 'middle' }
 
+// Role-family bases: Software Engineering, Product/TPM, Data/ML (plus anything
+// configured). Each one is a *selection* over the same verified Career Evidence —
+// which experience, projects and skills lead — not a second copy of the truth, and
+// never different wording. A tailored resume normally derives from its family base.
+function RoleFamilyBases({ busy, onGenerate, refresh }) {
+  const navigate = useNavigate()
+  const [data, setData] = useState(null)
+  const load = useCallback(() => api.get('/resume-versions/role-families').then(({ data }) => setData(data)).catch(() => {}), [])
+  useEffect(() => { load() }, [load, refresh])
+  if (!data?.families?.length) return null
+  return (
+    <div style={{ background: 'var(--surface)', border: '1px solid var(--line)', borderRadius: 'var(--radius-card)', padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div>
+        <strong style={{ fontSize: 'var(--t-13)' }}>Role resumes</strong>
+        <Helper>One base per kind of role. Same verified evidence, ordered for that role — a tailored resume starts from the base matching the job.</Helper>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: 10 }}>
+        {data.families.map((f) => (
+          <div key={f.id} style={{ border: '1px solid var(--line-soft)', borderRadius: 'var(--radius-row)', padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ flex: 1, fontSize: 'var(--t-13)', fontWeight: 'var(--weight-semibold)' }}>{f.label}</span>
+              {f.base && <Tag tone={f.base.status === 'accepted' ? 'good' : 'accent'}>{f.base.status}</Tag>}
+            </div>
+            <Helper size="xs">{f.base ? `Built ${ago(f.base.created_at)}${f.base.pages ? ` · ${f.base.pages}pp` : ''}` : 'Not generated yet'}</Helper>
+            <div style={{ display: 'flex', gap: 6 }}>
+              {f.base && <Button variant="secondary" size="sm" onClick={() => navigate(`/resumes/versions/${f.base.id}`)}>View</Button>}
+              <Button variant="secondary" size="sm" busy={busy === f.id} onClick={() => onGenerate(f.id)}>{f.base ? 'Regenerate' : 'Generate'}</Button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 export default function Resumes() {
   useTitle('Resume')
   const navigate = useNavigate()
@@ -46,9 +81,10 @@ export default function Resumes() {
     catch (e) { pushToast({ kind: 'error', msg: errMsg(e, 'Request failed') }); return null }
     finally { setBusy('') }
   }
-  const generateBase = async () => {
+  const generateBase = async (roleFamily) => {
     setAddOpen(false)
-    const r = await act('base', () => api.post('/resume-versions/base'), 'Base résumé drafted — review and accept it')
+    const r = await act(roleFamily || 'base', () => api.post('/resume-versions/base', { role_family: roleFamily || null }),
+      roleFamily ? 'Role résumé drafted — review and accept it' : 'Base résumé drafted — review and accept it')
     if (r?.data?.id) navigate(`/resumes/versions/${r.data.id}`)
   }
   const importPdf = async (file) => {
@@ -88,7 +124,7 @@ export default function Resumes() {
               </Button>
               {addOpen && (
                 <Menu onDismiss={() => setAddOpen(false)} style={{ position: 'absolute', right: 0, top: 'calc(100% + 6px)', zIndex: 50, width: 280 }}>
-                  <MenuItem onClick={generateBase} hint="from Profile">Generate base résumé</MenuItem>
+                  <MenuItem onClick={() => generateBase()} hint="from Career Evidence">Generate base résumé</MenuItem>
                   <MenuItem onClick={() => { setAddOpen(false); fileRef.current?.click() }}>Import a PDF into your profile…</MenuItem>
                   <MenuItem onClick={() => navigate('/feed')}>Tailor for a job…</MenuItem>
                 </Menu>
@@ -97,12 +133,14 @@ export default function Resumes() {
             </div>
           </div>
 
+          <RoleFamilyBases busy={busy} onGenerate={generateBase} refresh={rows} />
+
           {err ? (
             <Notice tone="bad" action={<Button size="sm" variant="secondary" onClick={load}>Retry</Button>}><Helper>Couldn’t load your résumés. Check that the backend is running.</Helper></Notice>
           ) : !rows ? (
             <Helper><Spinner /> Loading…</Helper>
           ) : all.length === 0 ? (
-            <Notice tone="quiet" glyph="○" action={<Button size="sm" busy={busy === 'base'} onClick={generateBase}>Generate base résumé</Button>}>
+            <Notice tone="quiet" glyph="○" action={<Button size="sm" busy={busy === 'base'} onClick={() => generateBase()}>Generate base résumé</Button>}>
               <strong style={{ fontSize: 'var(--t-13)' }}>No résumés yet</strong>
               <Helper>A base résumé renders your verified Profile facts through the LaTeX template. Tailored versions for each job diff against it.</Helper>
             </Notice>

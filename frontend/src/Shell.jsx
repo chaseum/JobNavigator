@@ -14,7 +14,7 @@ import './theme.css'
 // in a quieter group below, scrape health and the user at the foot.
 const PRIMARY = [
   ['/feed', 'Jobs', Briefcase], ['/resumes', 'Resume', FileText], ['/applications', 'Applications', Send],
-  ['/profile', 'Profile', IdCard], ['/settings', 'Settings', SettingsIcon],
+  ['/profile', 'Career Evidence', IdCard], ['/settings', 'Settings', SettingsIcon],
 ]
 const MORE = [
   ['/dashboard', 'Dashboard', LayoutDashboard], ['/searches', 'Searches', Search], ['/companies', 'Companies', Building2],

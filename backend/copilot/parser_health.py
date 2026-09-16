@@ -8,7 +8,10 @@ import io
 import re
 import unicodedata
 
-_LIGATURES = {"ﬀ": "ff", "ﬁ": "fi", "ﬂ": "fl", "ﬃ": "ffi", "ﬄ": "ffl"}
+_LIGATURES = {"ﬀ": "ff", "ﬁ": "fi", "ﬂ": "fl", "ﬃ": "ffi", "ﬄ": "ffl",
+              # TeX renders a typed ' as ’, so the PDF text and the résumé JSON
+              # would otherwise disagree on every possessive.
+              "’": "'", "‘": "'", "“": '"', "”": '"'}
 
 
 def normalize(text: str) -> str:

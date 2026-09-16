@@ -1,7 +1,5 @@
 """A JobSpy board that hard-fails must not look like one that found nothing; jobspy swallows per-board failures into its own loggers, so these tests pin the per-source breakdown, warning flag and run summary."""
 import logging
-import sys
-import types
 
 import pytest
 
@@ -18,22 +16,31 @@ def _board_logger(name):
     return logger
 
 
-def _fake_jobspy(rows, log_errors=()):
-    """Install a stand-in jobspy module whose scrape_jobs returns rows and emits log_errors on non-propagating loggers, like the real library does."""
-    import pandas as pd
+@pytest.fixture(autouse=True)
+def _restore_board_runner():
+    """Each board now runs in its own subprocess; these tests replace that worker, so put the real one back afterwards."""
+    import backend.scraper.sources.jobspy as J
+    real = J._scrape_board_sync
+    yield
+    J._scrape_board_sync = real
 
-    # loggers must exist before _capture_source_errors() enumerates them
-    boards = [_board_logger(name) for name, _ in log_errors]
 
-    def scrape_jobs(**kwargs):
-        for logger, (_, msg) in zip(boards, log_errors):
-            logger.error(msg)
-        return pd.DataFrame(rows)
+def _fake_boards(rows, errors=()):
+    """Stand in for the per-board worker process: each board returns only its own rows, or the error the real worker would have captured.
 
-    mod = types.ModuleType("jobspy")
-    mod.scrape_jobs = scrape_jobs
-    sys.modules["jobspy"] = mod
-    return mod
+    The worker itself (the jobspy call, the log capture, the JSON protocol) is
+    covered in test_jobspy_board_isolation.py; what these tests are about is what
+    `_run_sync` does with each board's outcome.
+    """
+    import backend.scraper.sources.jobspy as J
+    failed = {J.board_key(board): err for board, err in errors}
+
+    def fake(board, kwargs, timeout):
+        key = J.board_key(board)
+        assert "site_name" not in kwargs, "the parent must never ask one worker for several boards"
+        return [dict(r) for r in rows if r.get("site") == key], failed.get(key)
+
+    J._scrape_board_sync = fake
 
 
 def _row(site, title, company, url):
@@ -65,7 +72,7 @@ def _search(db, sources):
 def test_breakdown_counts_each_board(test_db, monkeypatch):
     from backend.scraper.sources.jobspy import _run_sync
 
-    _fake_jobspy([
+    _fake_boards([
         _row("indeed", "Program Manager", "Acme", "https://indeed.test/a"),
         _row("indeed", "Delivery Manager", "Acme", "https://indeed.test/b"),
         _row("linkedin", "Product Manager", "Beta", "https://linkedin.test/c"),
@@ -85,12 +92,9 @@ def test_breakdown_records_a_refused_board(test_db, monkeypatch):
     """The 403 ZipRecruiter logs is captured and condensed to its status code."""
     from backend.scraper.sources.jobspy import _run_sync
 
-    _fake_jobspy(
+    _fake_boards(
         [_row("indeed", "Program Manager", "Acme", "https://indeed.test/a")],
-        log_errors=[
-            ("JobSpy:ZipRecruiter", "ZipRecruiter response status code 403"),
-            ("JobSpy:Google", "initial cursor not found"),
-        ],
+        errors=[("zip_recruiter", "403"), ("google", "initial cursor not found")],
     )
     search = _search(test_db, ["indeed", "zip_recruiter", "google"])
 
@@ -130,16 +134,16 @@ def test_capture_attaches_to_the_non_propagating_board_logger():
     assert capture.errors == {"zip_recruiter": "403"}
 
 
-def test_capture_handler_is_removed_afterwards(test_db):
-    """No logger — root or board — may keep collecting after the call returns."""
-    from backend.scraper.sources.jobspy import _run_sync
+def test_capture_handler_is_removed_afterwards():
+    """No logger — root or board — may keep collecting after the worker's call returns."""
+    from backend.scraper.sources.jobspy import _capture_source_errors
 
     board = _board_logger("JobSpy:Indeed")
     before_root = len(logging.getLogger().handlers)
     before_board = len(board.handlers)
 
-    _fake_jobspy([], log_errors=[("JobSpy:Indeed", "boom 500")])
-    _run_sync(_search(test_db, ["indeed"]))
+    with _capture_source_errors(["indeed"]):
+        board.error("boom 500")
 
     assert len(logging.getLogger().handlers) == before_root
     assert len(board.handlers) == before_board

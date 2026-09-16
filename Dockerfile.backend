@@ -12,8 +12,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libcups2 libdrm2 libxkbcommon0 libatspi2.0-0 libxcomposite1 \
     libxdamage1 libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 \
     libcairo2 libasound2t64 libwayland-client0 \
-    # Local LaTeX for the resume pipeline (base + recommended packages and Latin Modern only)
-    texlive-latex-base texlive-latex-recommended texlive-fonts-recommended lmodern \
+    # Local LaTeX for the resume pipeline. latex-extra brings titlesec/enumitem/
+    # fullpage and fonts-extra brings marvosym, which the vendored Jake's Resume
+    # template (backend/resume/templates/jakes) loads; glyphtounicode ships with
+    # latex-base and keeps the generated PDF's text extractable.
+    texlive-latex-base texlive-latex-recommended texlive-latex-extra \
+    texlive-fonts-recommended texlive-fonts-extra lmodern \
     && rm -rf /var/lib/apt/lists/*
 
 COPY backend/requirements.txt .

@@ -113,7 +113,7 @@ def test_latex_escapes_every_value_and_keeps_links():
     resume["sections"][1]["entries"][0]["bullets"][0]["text"] = r"Saved $5k & 20% on C# \o/ {builds} ~ ^_^"
     tex = latex.render(resume)
     assert r"Saved \$5k \& 20\% on C\# \textbackslash{}o/ \{builds\} \textasciitilde{} \textasciicircum{}\_\textasciicircum{}" in tex
-    assert r"\href{https://linkedin.com/in/ada_l}{linkedin.com/in/ada\_l}" in tex
+    assert r"\href{https://linkedin.com/in/ada_l}{\underline{linkedin.com/in/ada\_l}}" in tex
     assert "(((" not in tex and "((*" not in tex
 
 

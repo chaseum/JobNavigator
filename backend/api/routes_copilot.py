@@ -78,6 +78,45 @@ def audit_resumes(job_id: str, body: dict | None = None, db: Session = Depends(g
     return {vid: {"score": r["score"], "maximum": r["maximum"], "kind": r["kind"]} for vid, r in out.items()}
 
 
+def _role_family_block(db, rec) -> dict:
+    """Which role family this posting is, why, and the options to override it.
+
+    Classification decides which base résumé a tailored draft derives from. It is
+    deliberately no part of Candidate Fit: what kind of role a posting is says
+    nothing about how well the candidate's evidence supports it.
+    """
+    from backend.copilot import role_families as RF
+    verdict = None
+    if not rec.role_family:
+        verdict = RF.classify(rec.analysis or {}, db)
+    family_id = rec.role_family or (verdict or {}).get("family") or ""
+    family = RF.get(family_id, db)
+    return {
+        "id": family_id, "label": family["label"] if family else "",
+        "source": rec.role_family_source or ("auto" if verdict else None),
+        "reason": rec.role_family_reason or (f"{verdict['reason']} (confidence {verdict['confidence']})" if verdict else ""),
+        "saved": bool(rec.role_family),
+        "options": [{"id": f["id"], "label": f["label"]} for f in RF.families(db)],
+    }
+
+
+@router.put("/jobs/{job_id}/role-family")
+def set_role_family(job_id: str, body: dict, db: Session = Depends(get_db)):
+    """Override the classifier for an ambiguous posting. Affects which base the résumé is tailored from, nothing else."""
+    from backend.copilot import role_families as RF
+    _job_or_404(db, job_id)
+    rec = latest_record(db, job_id)
+    if rec is None:
+        raise HTTPException(400, "analyze the job first")
+    family_id = str(body.get("role_family") or "")
+    if RF.get(family_id, db) is None:
+        raise HTTPException(400, f"unknown role family {family_id!r}")
+    rec.role_family, rec.role_family_source = family_id, "user"
+    rec.role_family_reason = "you chose this role family"
+    db.commit()
+    return _role_family_block(db, rec)
+
+
 @router.get("/jobs/{job_id}")
 def job_workspace(job_id: str, base_version_id: str | None = None, db: Session = Depends(get_db)):
     job = _job_or_404(db, job_id)
@@ -125,6 +164,7 @@ def job_workspace(job_id: str, base_version_id: str | None = None, db: Session =
                 "evidence": [{"ref": s, "headline": headlines.get(s) or s} for s in e.get("source_fact_ids", [])]}
     out["requirements"] = [row(r) for r in reqs]
     out["match"] = rec.match
+    out["role_family"] = _role_family_block(db, rec)
     out["jd_stale"] = jd_stale
     out["outdated"] = match_is_outdated(rec.match)
     out["stale"] = rec.evidence is None or rec.profile_version != F.profile_version(db) or jd_stale or out["outdated"]

@@ -52,7 +52,11 @@ DEFAULT_SETTINGS = {
                            "Candidate Fit and Resume Applicability weights (JSON): required / preferred weight per requirement "
                            "(times its importance 1-3); soft_skill and responsibility multiply those. Eligibility is never scored."),
     "role_match_min_recommended": ("70", "Role Match at or above which a job is marked recommended"),
-    "resume_template": ("default", "LaTeX résumé template folder under backend/resume/templates"),
+    "resume_template": ("jakes", "LaTeX résumé template folder under backend/resume/templates (jakes = Jake Gutierrez's \"Jake's Resume\")"),
+    "role_families": ("[]", "Extra role families beyond Software Engineering / Product / Data-ML (JSON list of "
+                            "{id, label, title: [...], evidence: [...]}); an entry reusing a built-in id replaces it"),
+    "jobspy_board_timeout": ("150", "Seconds one keyword board (LinkedIn, Indeed, Google, ZipRecruiter) may run before its "
+                                    "worker process is killed. A stuck board never strands the other boards."),
     "resume_page_target": ("1", "Target résumé length in pages; a longer PDF is flagged"),
     "resume_project_policy": ("reorder", "Projects on a tailored résumé: keep (as in base), reorder, or replace (pick different projects)"),
     "resume_skill_ordering": ("relevance", "Skill order: relevance (to the job) or profile (your order)"),
@@ -440,6 +444,17 @@ def invalid_setting_values(updates: dict) -> list:
             elif int(str(value).strip()) < 0:
                 problems.append(f"{key}: must not be negative (got {value!r})")
             continue
+        if key == "role_families":
+            from backend.copilot.role_families import _valid
+            try:
+                entries = json.loads(value) if isinstance(value, str) else value
+                ok = isinstance(entries, list) and all(_valid(e) for e in entries)
+            except ValueError:
+                ok = False
+            if not ok:
+                problems.append(f"{key}: must be a JSON list of {{id, label, title, evidence}} "
+                                "(id lowercase letters, digits and underscores)")
+            continue
         if key == "role_match_weights":
             try:
                 w = json.loads(value) if isinstance(value, str) else value
@@ -755,6 +770,9 @@ END $$;""",
         """UPDATE settings SET value = '{"required": 3, "preferred": 1, "soft_skill": 0.5, "responsibility": 0.5}'
           WHERE key = 'role_match_weights'
             AND value = '{"eligibility": 30, "required": 30, "preferred": 10, "experience": 15, "technology": 10, "parser_health": 5}'""",
+        # Jake's Resume becomes the default generated layout. Only rows still holding
+        # the previous seeded default move; anyone who picked a template keeps it.
+        "UPDATE settings SET value = 'jakes' WHERE key = 'resume_template' AND value = 'default'",
     ]
     run_migration_statements(db, migrations)
 

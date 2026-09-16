@@ -118,15 +118,19 @@ Scrape career pages and aggregators, score jobs against your résumés with an L
 JobNavigator keeps a fact database of your career, and a model is never the source of truth:
 
 ```
-profile facts → job requirements → evidence mapping → résumé plan → safe rewrites → claim audit → LaTeX/PDF → autofill
+your résumés → extracted claims → reconciled Career Evidence → role-family base
+             → job requirements → evidence mapping → résumé plan → safe rewrites
+             → claim audit → LaTeX/PDF → autofill
 ```
 
 | Step | Where | What it guarantees |
 |------|-------|--------------------|
-| **Profile** | `/profile` | Employment, internships, projects, research, skills linked to where you used them, education, certifications, achievements, links, work authorization, preferences. Imported facts arrive **unverified** and are ignored until you verify them. Put everything true here, far more than fits on one page. |
+| **Résumé Library** | `/profile` | Upload every historical résumé you have, several at once. Each document is kept as a source, and every canonical fact shows which of them support it. You never retype what a résumé already says. |
+| **Career Evidence** | `/profile` | The reconciled facts: employment, internships, projects, research, skills linked to where you used them, education, certifications, achievements, links. A second résumé describing the same job adds its extra bullets to one canonical role instead of forking a duplicate; a field two résumés state differently becomes a **conflict you resolve** — no model picks, and a stored value is never overwritten. Imported facts arrive **unverified** and are ignored until you confirm them. Add anything true your résumés left out. |
+| **Role résumés** | `/resumes` | One base per role family — Software Engineering, Product / Technical PM, Data / ML, plus any you configure. A family base is a *selection* over the same verified evidence, not a separate truth: it decides what leads, never what may be claimed. A job is classified into a family (with a reason you can override) and its tailored résumé derives from that base. Classification is no part of Candidate Fit. |
 | **Role Match** | a job's **Workspace** (`/jobs/:id`) | Requirements are extracted with schema-constrained output at temperature 0 and marked MATCHED / PARTIAL / MISSING / UNKNOWN with the facts that support each one. The 0–100 score is computed deterministically, every component is shown, and the weights live in Settings › Copilot. A claim without a verified citation earns nothing, and work authorization comes only from your own answers. It measures evidence coverage; it is not any employer's ATS score. |
 | **Gaps** | Workspace | Safe to add · safe to rephrase · cannot claim · needs clarification. New context is saved as a verified profile fact first, then the match reruns. A missing requirement is never written onto a résumé. |
-| **Résumé** | Workspace | Drafted only from verified facts, through a fixed LaTeX template (`backend/resume/templates/default`). Employers, titles, schools, degrees, project names and dates are copied from facts, never written by the model. Every bullet carries `source_fact_ids`. Machine checks (uncited claims; numbers or tools absent from the sources) plus a second model audit mark each claim SUPPORTED / AMBIGUOUS / UNSUPPORTED. An unsupported claim blocks the PDF, and nothing is fixed silently. **Parser Health** reads the compiled PDF back and checks the name, headings, companies, titles, schools, skills, bullet order and encoding. |
+| **Résumé** | Workspace | Drafted only from verified facts, through a fixed LaTeX template — by default Jake Gutierrez's MIT-licensed [Jake's Resume](https://github.com/jakegut/resume), vendored in `backend/resume/templates/jakes` with its license and provenance. Employers, titles, schools, degrees, project names and dates are copied from facts, never written by the model. Every bullet carries `source_fact_ids`. Machine checks (uncited claims; numbers or tools absent from the sources) plus a second model audit mark each claim SUPPORTED / AMBIGUOUS / UNSUPPORTED. An unsupported claim blocks the PDF, and nothing is fixed silently. **Parser Health** reads the compiled PDF back and checks the name, headings, companies, titles, schools, skills, bullet order and encoding. |
 | **Review** | Workspace | Base vs. tailored diff. For each change: inspect its sources, the requirements it addresses and the reason; accept, reject, regenerate or edit. Accepted versions are immutable and written to `generated/<company>/<role>/<date>-<id>/` (`resume.tex`, `resume.pdf`, `resume.json`, `audit.json`, `job-analysis.json`). |
 | **Apply** | Chrome extension | On an application page for a saved job it fills profile fields, uploads that job's **accepted** résumé, reuses **Answer Bank** answers (`/answer-bank`), outlines every field that needs you, and records the application as *Ready to apply*. It never clicks Submit. Work authorization, sponsorship, EEO, disability, veteran status, salary and legal attestations are never drafted by AI. |
 
@@ -159,8 +163,8 @@ For the local default, install [Ollama](https://ollama.com) on the host and `oll
 
 **First steps:**
 1. Settings › AI — Ollama (default) with a model you have pulled, or another provider and key
-2. Profile — import a résumé, verify the facts, then add everything the résumé leaves out
-3. Résumés — generate a base résumé from your facts and accept it
+2. Career Evidence — drop in every résumé you have, resolve any conflicts, confirm the facts, then add what they left out
+3. Résumés — generate a base résumé for each role family you apply to, and accept it
 4. Companies and Searches — add a few and run them, or save any posting with the extension
 5. A job's Workspace — analyze, review the match and gaps, generate and accept a résumé, then apply with the extension
 

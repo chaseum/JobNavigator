@@ -548,6 +548,64 @@ class CandidateFact(Base):
                             backref=backref("parent", remote_side=[id]))
 
 
+# ── Résumé Library ───────────────────────────────────────────────────────────
+# One uploaded historical résumé. It is *evidence*, not truth: the extracted
+# claims are reconciled into CandidateFact rows (backend/copilot/evidence.py) and
+# the link between them is kept, so any fact can say which documents support it.
+# The PDF bytes are not kept — the extracted text and the parsed JSON are what
+# reconciliation and re-imports need, and sha256 is what makes an upload idempotent.
+class ResumeSource(Base):
+    __tablename__ = "resume_sources"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    filename = Column(String, nullable=False)
+    sha256 = Column(String(64), nullable=False, unique=True, index=True)
+    status = Column(String(16), nullable=False, default="pending")   # pending | parsing | imported | failed
+    error = Column(Text, nullable=True)
+    parsed_json = Column(JSON, nullable=True)
+    parsed_text = deferred(Column(Text, nullable=True))
+    result = Column(JSON, nullable=True)          # per-outcome tally from the last reconcile
+    uploaded_at = Column(DateTime(timezone=True), default=utcnow)
+    imported_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class CandidateFactSource(Base):
+    """Which uploaded résumé(s) support a canonical fact, and where in the document."""
+    __tablename__ = "candidate_fact_sources"
+    __table_args__ = (UniqueConstraint("candidate_fact_id", "resume_source_id", name="uq_fact_source"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    candidate_fact_id = Column(Integer, ForeignKey("candidate_facts.id", ondelete="CASCADE"), nullable=False, index=True)
+    resume_source_id = Column(Integer, ForeignKey("resume_sources.id", ondelete="CASCADE"), nullable=False, index=True)
+    locator = Column(String(200), nullable=False, default="")   # e.g. experience[2].bullets[1]
+    raw_text = Column(Text, nullable=True)                      # the supporting text as the résumé wrote it
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+
+    # No passive_deletes: SQLite does not enforce ON DELETE CASCADE unless
+    # foreign_keys is on, so the ORM clears these links itself on both backends.
+    fact = relationship("CandidateFact", backref=backref("sources", cascade="all, delete-orphan"))
+    source = relationship("ResumeSource", backref=backref("fact_links", cascade="all, delete-orphan"))
+
+
+class FactConflict(Base):
+    """Two résumés state the same field differently. The user chooses; no model ever does."""
+    __tablename__ = "fact_conflicts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    candidate_fact_id = Column(Integer, ForeignKey("candidate_facts.id", ondelete="CASCADE"), nullable=False, index=True)
+    field = Column(String(64), nullable=False)
+    current_value = Column(Text, nullable=True)      # what the canonical fact says now
+    proposed_value = Column(Text, nullable=True)     # what the newly imported résumé says
+    resume_source_id = Column(Integer, ForeignKey("resume_sources.id", ondelete="SET NULL"), nullable=True)
+    status = Column(String(16), nullable=False, default="open")   # open | resolved
+    resolved_value = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+
+    fact = relationship("CandidateFact", backref=backref("conflicts", cascade="all, delete-orphan"))
+    source = relationship("ResumeSource")
+
+
 # ── Job analysis / Role Match ────────────────────────────────────────────────
 # `analysis` is the LLM's structured extraction (schemas.JobAnalysis) and never
 # changes once written; `evidence`/`match` are recomputed whenever the profile
@@ -566,6 +624,12 @@ class JobAnalysisRecord(Base):
     match = Column(JSON, nullable=True)
     profile_version = Column(String(16), nullable=True)
     matched_at = Column(DateTime(timezone=True), nullable=True)
+    # Which role family this posting belongs to (backend/copilot/role_families.py).
+    # A label for choosing the base resume to tailor from, and nothing else: it is
+    # deliberately not an input to Candidate Fit.
+    role_family = Column(String(40), nullable=True)
+    role_family_source = Column(String(8), nullable=True)   # auto | user
+    role_family_reason = Column(String, nullable=True)
 
 
 # ── Résumé versions ──────────────────────────────────────────────────────────
@@ -582,12 +646,15 @@ class ResumeVersion(Base):
     status = Column(String, nullable=False, default="draft")      # draft | accepted | rejected
     created_at = Column(DateTime(timezone=True), default=utcnow)
     accepted_at = Column(DateTime(timezone=True), nullable=True)
-    template = Column(String, nullable=False, default="default")
+    template = Column(String, nullable=False, default="jakes")
     template_version = Column(String(16), nullable=True)
     candidate_profile_version = Column(String(16), nullable=True)
     job_analysis_id = Column(Integer, nullable=True)
     job_analysis = Column(JSON, nullable=True)   # snapshot: analysis + evidence + match at generation time
     base_version_id = Column(UUID(as_uuid=True), nullable=True)
+    # base rows: which role family this base is a selection for (NULL = the
+    # universal base). tailored rows: the family its base was chosen from.
+    role_family = Column(String(40), nullable=True)
     provider = Column(String, nullable=True)
     model = Column(String, nullable=True)
     resume_json = Column(JSON, nullable=False)
@@ -756,4 +823,11 @@ def create_tables():
         conn.execute(text(
             "ALTER TABLE searches ADD COLUMN IF NOT EXISTS exclude_active_companies BOOLEAN DEFAULT FALSE"
         ))
+        for statement in (
+            "ALTER TABLE resume_versions ADD COLUMN IF NOT EXISTS role_family VARCHAR(40)",
+            "ALTER TABLE job_analyses ADD COLUMN IF NOT EXISTS role_family VARCHAR(40)",
+            "ALTER TABLE job_analyses ADD COLUMN IF NOT EXISTS role_family_source VARCHAR(8)",
+            "ALTER TABLE job_analyses ADD COLUMN IF NOT EXISTS role_family_reason VARCHAR",
+        ):
+            conn.execute(text(statement))
         conn.commit()

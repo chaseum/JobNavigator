@@ -590,6 +590,31 @@ export function ResumeReview({ versionId, factHeadlines, onChanged, pushToast, o
   )
 }
 
+// Which role family this posting is. It decides which base resume a tailored
+// draft derives from (SWE, Product/TPM, Data/ML, or one you configured) and
+// nothing else — it is deliberately no part of Candidate Fit. Override it when
+// the classifier reads an ambiguous title the wrong way.
+function RoleFamilyPicker({ rf, jobId, onChanged, pushToast }) {
+  const [saving, setSaving] = useState(false)
+  if (!rf?.options?.length) return null
+  const pick = async (id) => {
+    if (id === rf.id) return
+    setSaving(true)
+    try { await api.put(`/copilot/jobs/${jobId}/role-family`, { role_family: id }); await onChanged() }
+    catch (e) { pushToast({ kind: 'error', msg: errMsg(e, 'Could not set the role family') }) }
+    finally { setSaving(false) }
+  }
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+      <Label size="lg" title="Chooses the base résumé this job is tailored from. Not part of Candidate Fit.">Role</Label>
+      {rf.options.map((o) => (
+        <Pill key={o.id} size="sm" on={o.id === rf.id} disabled={saving} onClick={() => pick(o.id)}>{o.label}</Pill>
+      ))}
+      <Helper size="xs">{rf.source === 'user' ? 'You chose this.' : rf.reason}</Helper>
+    </div>
+  )
+}
+
 function ResumeTab({ ws, versions, selected, setSelected, reviewKey, busy, onAnalyze, onRematch, onGenerate, onAudit, auditing, onCreateBase, creatingBase,
   factHeadlines, headlines, entries, onContextSaved, onChanged, pushToast }) {
   const [which, setWhich] = useState('base')
@@ -612,6 +637,7 @@ function ResumeTab({ ws, versions, selected, setSelected, reviewKey, busy, onAna
   const shown = which === 'tailored' && ra?.tailored ? ra.tailored : ra?.base
   return (
     <>
+      <RoleFamilyPicker rf={ws.role_family} jobId={ws.job.id} onChanged={onChanged} pushToast={pushToast} />
       {ra && <ApplicabilitySummary ra={ra} busy={busy} auditing={auditing} onAudit={onAudit} onGenerate={onGenerate} onCreateBase={onCreateBase} creatingBase={creatingBase} />}
       {ra && <BeforeAfter ra={ra} headlines={headlines} />}
       {ra?.base && ra?.tailored && (
