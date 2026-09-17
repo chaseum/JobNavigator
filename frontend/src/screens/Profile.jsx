@@ -185,13 +185,42 @@ function IdentityForm({ section, identity, onSave }) {
   )
 }
 
-const STATUS_TONE = { imported: 'good', failed: 'bad', pending: 'warn', parsing: 'warn' }
-const STATUS_TEXT = { imported: 'imported', failed: 'failed', pending: 'queued', parsing: 'reading…' }
+const STATUS_TONE = { imported: 'good', failed: 'bad', waiting_for_ai: 'warn', pending: 'warn', parsing: 'warn' }
+const STATUS_TEXT = { imported: 'imported', failed: 'failed', waiting_for_ai: 'waiting for AI', pending: 'queued', parsing: 'reading…' }
+
+function KnowledgeSearch() {
+  const [query, setQuery] = useState('')
+  const [results, setResults] = useState([])
+  const [busy, setBusy] = useState(false)
+  const submit = async (e) => {
+    e.preventDefault()
+    if (!query.trim()) return
+    setBusy(true)
+    try { const { data } = await api.get('/profile/knowledge/search', { params: { q: query.trim() } }); setResults(data.results || []) }
+    catch { setResults([]) }
+    finally { setBusy(false) }
+  }
+  return (
+    <Card style={{ padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <Helper size="xs">Search everything I’ve done…</Helper>
+      <form onSubmit={submit} style={{ display: 'flex', gap: 8 }}>
+        <Input value={query} onChange={setQuery} placeholder="AWS messaging" ariaLabel="Search Knowledge Bank" style={{ flex: 1 }} />
+        <Button type="submit" size="sm" busy={busy}>Search</Button>
+      </form>
+      {results.map((r) => <div key={(r.chunk_id || 'fact') + '-' + (r.fact_id || r.chunk_id)} style={{ borderTop: '1px solid var(--line-soft)', paddingTop: 7 }}>
+        <Helper size="xs">{r.filename || ((r.kind || 'evidence') + (r.fact_id ? ' #' + r.fact_id : ''))}</Helper>
+        <div style={{ fontSize: 13 }}>{r.text}</div>
+      </div>)}
+      {!busy && query.trim() && results.length === 0 && <Helper size="xs">No indexed evidence matched.</Helper>}
+    </Card>
+  )
+}
 
 function ResumeLibrary({ onChanged, pushToast }) {
   const [lib, setLib] = useState(null)
   const [bases, setBases] = useState([])
   const [busy, setBusy] = useState(false)
+  const [expanded, setExpanded] = useState(new Set())
   const dropRef = useRef(null)
   const fileRef = useRef(null)
 
@@ -205,12 +234,12 @@ function ResumeLibrary({ onChanged, pushToast }) {
   }, [lib?.importing, load, onChanged])
 
   const upload = async (files) => {
-    const pdfs = [...files].filter((f) => f.name.toLowerCase().endsWith('.pdf'))
-    if (!pdfs.length) return pushToast({ kind: 'error', msg: 'Résumés must be PDFs' })
+    const documents = [...files].filter((f) => /\.(pdf|md|txt|docx)$/i.test(f.name))
+    if (!documents.length) return pushToast({ kind: 'error', msg: 'Use PDF, Markdown, TXT, or DOCX documents' })
     setBusy(true)
     try {
       const fd = new FormData()
-      pdfs.forEach((f) => fd.append('files', f))
+      documents.forEach((f) => fd.append('files', f))
       const { data } = await api.post('/profile/resumes', fd, { headers: { 'Content-Type': 'multipart/form-data' } })
       const parts = [`${data.accepted.length} queued`]
       if (data.skipped.length) parts.push(`${data.skipped.length} already in the library`)
@@ -235,6 +264,21 @@ function ResumeLibrary({ onChanged, pushToast }) {
     await api.delete(`/profile/resumes/${s.id}`); await load(); onChanged()
   }
 
+  const reprocess = async (sourceId = null) => {
+    setBusy(true)
+    try {
+      const { data } = await api.post('/profile/resumes/reprocess', sourceId == null ? {} : { source_id: sourceId })
+      pushToast({ kind: 'success', msg: `${data.accepted} résumé${data.accepted === 1 ? '' : 's'} queued for reprocessing` })
+      await load(); onChanged()
+    } catch (e) { pushToast({ kind: 'error', msg: 'Reprocess failed — ' + errMsg(e, 'unknown error') }) } finally { setBusy(false) }
+  }
+
+  const retry = async (s) => {
+    setBusy(true)
+    try { await api.post(`/profile/resumes/${s.id}/retry`); pushToast({ kind: 'success', msg: `${s.filename} queued for retry` }); await load() }
+    catch (e) { pushToast({ kind: 'error', msg: 'Retry failed — ' + errMsg(e, 'unknown error') }) } finally { setBusy(false) }
+  }
+
   const sources = lib?.sources || []
   return (
     <>
@@ -245,10 +289,10 @@ function ResumeLibrary({ onChanged, pushToast }) {
         onDrop={(e) => { e.preventDefault(); dropRef.current.style.borderColor = 'var(--line)'; upload(e.dataTransfer.files) }}
         style={{ border: '1px dashed var(--line)', borderRadius: 'var(--radius-card)', padding: '22px 16px',
           textAlign: 'center', cursor: 'pointer', background: 'var(--surface-2, transparent)' }}>
-        <div style={{ fontSize: 13.5, fontWeight: 600 }}>Drop your résumés here</div>
-        <Helper>Select or drag several PDFs at once — every résumé you have ever sent out. Each one is read, and what it
-          says is merged into one entry per real job, degree or project. You review the result; nothing is used until you confirm it.</Helper>
-        <input ref={fileRef} type="file" accept="application/pdf" multiple hidden
+        <div style={{ fontSize: 13.5, fontWeight: 600 }}>Drop career documents here</div>
+        <Helper>Select or drag PDFs, Markdown, TXT, or DOCX files. Each source is read into one Knowledge Bank, and you
+          review the extracted evidence before it can be used.</Helper>
+        <input ref={fileRef} type="file" accept=".pdf,.md,.txt,.docx" multiple hidden
           onChange={(e) => { const f = e.target.files; e.target.value = ''; if (f?.length) upload(f) }} />
       </div>
 
@@ -258,10 +302,11 @@ function ResumeLibrary({ onChanged, pushToast }) {
         {bases.map((r) => (
           <Button key={r.id} variant="secondary" size="sm" busy={busy} onClick={() => importOther(() => api.post('/profile/import', { resume_id: r.id }), r.name)}>{r.name}</Button>
         ))}
+        {sources.length > 0 && <Button variant="secondary" size="sm" busy={busy} onClick={() => reprocess()}>Reprocess all résumé sources</Button>}
       </div>
 
-      {lib?.importing && <Notice tone="quiet" glyph="◴">Reading your résumés… this page updates as each one finishes.</Notice>}
-      {sources.length === 0 && !lib?.importing && <Helper>No résumés uploaded yet.</Helper>}
+      {lib?.importing && <Notice tone="quiet" glyph="◴">Processing documents — {lib.progress?.imported || 0} imported, {lib.progress?.parsing || 0} reading, {lib.progress?.pending || 0} queued. This page updates as each one finishes.</Notice>}
+      {sources.length === 0 && !lib?.importing && <Helper>No Knowledge Bank documents uploaded yet.</Helper>}
 
       {sources.map((s) => (
         <Card key={s.id} style={{ padding: '10px 14px', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
@@ -277,11 +322,33 @@ function ResumeLibrary({ onChanged, pushToast }) {
           )}
           {s.conflicts > 0 && <Tag tone="warn">{s.conflicts} conflict{s.conflicts === 1 ? '' : 's'}</Tag>}
           {s.error && <Helper size="xs" style={{ color: 'var(--bad)' }}>{s.error}</Helper>}
+          {(s.status === 'failed' || s.status === 'waiting_for_ai' || s.status === 'imported') && <Button variant="secondary" size="sm" busy={busy} onClick={() => s.status === 'failed' || s.status === 'waiting_for_ai' ? retry(s) : reprocess(s.id)}>{s.status === 'failed' || s.status === 'waiting_for_ai' ? 'Retry' : 'Reprocess'}</Button>}
+          {s.report?.length > 0 && <Button variant="secondary" size="sm" onClick={() => setExpanded((old) => { const n = new Set(old); n.has(s.id) ? n.delete(s.id) : n.add(s.id); return n })}>{expanded.has(s.id) ? 'Hide report' : 'Details'}</Button>}
           <Button variant="secondary" size="sm" onClick={() => remove(s)}>Forget</Button>
+          {expanded.has(s.id) && <div style={{ flexBasis: '100%', borderTop: '1px solid var(--line-soft)', paddingTop: 8 }}>
+            {s.report.map((r, i) => <Helper key={`${s.id}-${i}`} size="xs" style={{ display: 'block' }}>{r.outcome === 'novel' ? 'New' : r.outcome === 'enriched' ? 'Added evidence' : r.outcome === 'duplicate' ? 'Already known' : r.outcome === 'conflict' ? 'Conflict' : 'Needs review'} · {r.headline || r.kind}</Helper>)}
+          </div>}
         </Card>
       ))}
     </>
   )
+}
+
+function AchievementGroups({ facts, schema, ops, selected, onSelect }) {
+  const groups = new Map()
+  facts.filter((f) => f.kind === 'achievement').forEach((f) => {
+    const key = f.parent_id || 0
+    if (!groups.has(key)) groups.set(key, [])
+    groups.get(key).push(f)
+  })
+  const byId = new Map(facts.map((f) => [f.id, f]))
+  return [...groups.entries()].map(([parentId, rows]) => <Card key={parentId} style={{ padding: 10 }}>
+    <div style={{ fontSize: 13, fontWeight: 600, padding: '2px 4px 8px' }}>
+      {parentId ? headline(byId.get(parentId)?.kind, byId.get(parentId)?.data) : 'Standalone achievements'}
+    </div>
+    {rows.map((f) => <FactCard key={f.id} fact={f} schema={schema} facts={facts} api={ops}
+      selected={selected.has(f.id)} onSelect={onSelect} />)}
+  </Card>)
 }
 
 function Conflicts({ onChanged, pushToast }) {
@@ -356,7 +423,7 @@ export default function Profile() {
   const counts = useMemo(() => facts.reduce((m, f) => { m[f.kind] = (m[f.kind] || 0) + 1; return m }, {}), [facts])
   const unverifiedIds = facts.filter((f) => !f.verified).map((f) => f.id)
   const isFactSection = FACT_SECTIONS.some(([k]) => k === section)
-  const rows = facts.filter((f) => f.kind === section && (section !== 'achievement' || f.parent_id == null))
+  const rows = facts.filter((f) => f.kind === section)
   const childrenOf = (id) => facts.filter((f) => f.parent_id === id)
 
   const navCount = (id) => (id === 'library' ? prof?.resume_count : id === 'conflicts' ? prof?.open_conflicts : counts[id])
@@ -393,7 +460,10 @@ export default function Profile() {
 
         <div className="v2-scroll" style={{ flex: 1, overflow: 'auto', padding: '16px 26px 30px', display: 'flex', flexDirection: 'column', gap: 10, minWidth: 0 }}>
           {!prof ? null : section === 'library' ? (
-            <ResumeLibrary pushToast={pushToast} onChanged={load} />
+            <>
+              <KnowledgeSearch />
+              <ResumeLibrary pushToast={pushToast} onChanged={load} />
+            </>
           ) : section === 'conflicts' ? (
             <Conflicts pushToast={pushToast} onChanged={load} />
           ) : isFactSection ? (
@@ -412,15 +482,17 @@ export default function Profile() {
                     onClick={async () => { await ops.verify([...picked]); setPicked(new Set()) }}>Confirm {picked.size || ''}</Button>
                 </Card>
               )}
-              {rows.map((f) => (
-                <FactCard key={f.id} fact={f} schema={prof.schema} facts={facts} api={ops}
-                  selected={picked.has(f.id)} onSelect={toggle}>
-                  {childrenOf(f.id).map((c) => (
-                    <FactCard key={c.id} fact={c} schema={prof.schema} facts={facts} api={ops} depth={1}
-                      selected={picked.has(c.id)} onSelect={toggle} />
-                  ))}
-                </FactCard>
-              ))}
+              {section === 'achievement'
+                ? <AchievementGroups facts={facts} schema={prof.schema} ops={ops} selected={picked} onSelect={toggle} />
+                : rows.map((f) => (
+                  <FactCard key={f.id} fact={f} schema={prof.schema} facts={facts} api={ops}
+                    selected={picked.has(f.id)} onSelect={toggle}>
+                    {childrenOf(f.id).map((c) => (
+                      <FactCard key={c.id} fact={c} schema={prof.schema} facts={facts} api={ops} depth={1}
+                        selected={picked.has(c.id)} onSelect={toggle} />
+                    ))}
+                  </FactCard>
+                ))}
               {adding ? (
                 <Card style={{ padding: 14 }}>
                   <FactForm kind={section} fields={prof.schema[section]} initial={section === 'internship' ? { employment_type: 'internship' } : {}}

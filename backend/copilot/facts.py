@@ -231,7 +231,7 @@ def fact_headline(kind: str, d: dict) -> str:
     if kind == "project":
         return f"Project: {d.get('name')}" + (f" ({d['role']})" if d.get("role") else "") + _span(d)
     if kind == "research":
-        return f"Research: {d.get('title') or 'Researcher'} at {d.get('organization')}{_span(d)}"
+        return f"Research: {d.get('title') or 'Research entry'} at {d.get('organization')}{_span(d)}"
     if kind == "skill":
         return f"Skill: {d.get('name')}" + (f" [{d['category']}]" if d.get("category") else "") + (f" — {d['proficiency']}" if d.get("proficiency") else "")
     if kind == "certification":

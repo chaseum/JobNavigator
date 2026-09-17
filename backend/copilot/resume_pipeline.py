@@ -23,6 +23,34 @@ DEFAULT_SECTION_ORDER = ["education", "experience", "research", "projects", "ski
 SEVERITY = {"SUPPORTED": 0, "AMBIGUOUS": 1, "UNSUPPORTED": 2}
 _MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
+_US_STATE_NAMES = {"alabama":"AL", "alaska":"AK", "arizona":"AZ", "arkansas":"AR", "california":"CA", "colorado":"CO", "connecticut":"CT", "florida":"FL", "georgia":"GA", "illinois":"IL", "maryland":"MD", "massachusetts":"MA", "michigan":"MI", "minnesota":"MN", "missouri":"MO", "new jersey":"NJ", "new york":"NY", "north carolina":"NC", "ohio":"OH", "oregon":"OR", "pennsylvania":"PA", "texas":"TX", "utah":"UT", "virginia":"VA", "washington":"WA", "wisconsin":"WI"}
+
+
+def display_location(value: str) -> str:
+    """Render US locations as state/region while retaining the source fact unchanged."""
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    match = re.search(r"(?:,|\s)\s*([A-Z]{2})\s*$", raw, re.I)
+    if match and match.group(1).upper() in {"AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA", "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD", "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY"}:
+        return match.group(1).upper()
+    lowered = raw.casefold()
+    for name, code in _US_STATE_NAMES.items():
+        if re.search(rf"(?:,|\s){re.escape(name)}$", lowered):
+            return code
+    return raw
+
+
+_SKILL_LABELS = {"languages": "Languages", "frameworks_and_libraries": "Frameworks & Libraries", "cloud_and_devops": "Cloud & DevOps", "tools_and_apis": "Tools & APIs", "databases": "Databases", "ml_data": "ML / Data", "machine_learning": "ML / Data"}
+
+
+def skill_label(value: str) -> str:
+    raw = str(value or "").strip()
+    if raw.casefold() in _SKILL_LABELS:
+        return _SKILL_LABELS[raw.casefold()]
+    words = raw.replace("_", " ").split()
+    return " ".join(w.upper() if w.casefold() in {"api", "apis", "ml", "ai", "aws", "ci/cd"} else w.capitalize() for w in words)
+
 
 # ── facts ────────────────────────────────────────────────────────────────────
 
@@ -91,22 +119,33 @@ def base_bullets(ix: FactIndex, ref: str, limit: int | None = None) -> list[dict
     return out[:limit] if limit else out
 
 
-def entry_head(f) -> dict:
-    """Heading fields copied from the fact. Nothing a model wrote ever reaches these."""
+def entry_head(f, semantic: bool = False) -> dict:
+    """Heading fields copied from the fact.
+
+    ``semantic=True`` is used by generated résumés. The default legacy shape is
+    retained for callers that inspect the old structured API; the Jake renderer
+    itself always receives the corrected title/employer ordering.
+    """
     d, k = f.data or {}, f.kind
+    if k in ("experience", "internship") and semantic:
+        return {"heading": d["employer"], "subheading": d["title"], "title": d["title"], "employer": d["employer"], "location": display_location(d.get("location", "")),
+                "date": span_label(d.get("start_date"), d.get("end_date"))}
     if k in ("experience", "internship"):
         return {"heading": d["employer"], "subheading": d["title"], "location": d.get("location", ""),
                 "date": span_label(d.get("start_date"), d.get("end_date"))}
+    if k == "research" and semantic:
+        return {"heading": d["organization"], "subheading": d.get("title", ""), "research_title": d.get("title", ""), "organization": d["organization"],
+                "location": display_location(d.get("location", "")), "date": span_label(d.get("start_date"), d.get("end_date"))}
     if k == "research":
-        return {"heading": d["organization"], "subheading": d.get("title") or d.get("research_area") or "Research",
+        return {"heading": d["organization"], "subheading": d.get("title", ""),
                 "location": d.get("location", ""), "date": span_label(d.get("start_date"), d.get("end_date"))}
     if k == "project":
         return {"heading": d["name"], "subheading": d.get("role") or ", ".join(d.get("technologies") or []),
                 "location": "", "date": span_label(d.get("start_date"), d.get("end_date"))}
     if k == "education":
         sub = ", ".join(x for x in (d.get("degree"), d.get("major"), f"Minor in {d['minor']}" if d.get("minor") else "") if x)
-        return {"heading": d["institution"], "subheading": sub, "location": d.get("location", ""),
-                "date": date_label(d.get("graduation_date"))}
+        return {"heading": d["institution"], "subheading": sub, "location": display_location(d.get("location", "")),
+                "date": span_label(d.get("start_date"), d.get("graduation_date"))}
     if k == "certification":
         return {"heading": d["name"], "subheading": d.get("issuer", ""), "location": "", "date": date_label(d.get("date"))}
     raise ValueError(f"{k} is not a résumé entry")
@@ -136,7 +175,7 @@ def build_resume(ix: FactIndex, persona, bullets_by_entry: dict, project_refs: l
     """Structured résumé JSON. Bullet ids are "<entry ref>:<n>"; entries not in bullets_by_entry keep their base bullets."""
     def entry(f, bullets):
         ref = F.fact_ref(f)
-        return {"fact_id": ref, **entry_head(f),
+        return {"fact_id": ref, **entry_head(f, semantic=True),
                 "bullets": [{"id": f"{ref}:{i + 1}", **b} for i, b in enumerate(bullets)]}
 
     def bullets_for(f):
@@ -150,7 +189,8 @@ def build_resume(ix: FactIndex, persona, bullets_by_entry: dict, project_refs: l
             for ref in skill_refs:
                 s = ix.by_ref.get(ref)
                 if s is not None and s.kind == "skill":
-                    g = groups.setdefault((s.data or {}).get("category") or "Skills", {"items": [], "source_fact_ids": []})
+                    category = skill_label((s.data or {}).get("category") or "Skills")
+                    g = groups.setdefault(category, {"items": [], "source_fact_ids": []})
                     g["items"].append(s.data["name"])
                     g["source_fact_ids"].append(ref)
             if groups:

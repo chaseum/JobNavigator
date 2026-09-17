@@ -12,9 +12,10 @@ the career facts every generated claim must cite.
 """
 import json
 import logging
+import uuid
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -33,6 +34,25 @@ MAX_BATCH = 25   # a folder of historical résumés, not a bulk-upload endpoint
 # when reconciliation grew past a signature tuple, but this is where callers look.
 facts_from_resume_json = EV.facts_from_resume_json
 parse_date_range = EV.parse_date_range
+
+
+@router.get("/knowledge/search")
+async def search_knowledge(
+    q: str = Query("", min_length=0, max_length=500),
+    limit: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    """Semantic search over persisted Knowledge Bank chunks."""
+    if not q.strip():
+        return {"query": q, "results": []}
+    try:
+        from backend.copilot.knowledge import index_facts, search
+        await index_facts(db)
+        db.commit()
+        return {"query": q, "results": await search(db, q, limit)}
+    except Exception as exc:
+        logger.warning("Knowledge Bank search unavailable: %s", str(exc)[:400])
+        raise HTTPException(503, "Knowledge Bank semantic search is unavailable; check Ollama and its embedding model") from exc
 
 
 def _fact_dict(f: CandidateFact, sources: list | None = None, conflicts: int = 0) -> dict:
@@ -187,10 +207,12 @@ def verify_facts(body: dict, db: Session = Depends(get_db)):
 
 def _source_dict(s: ResumeSource, facts: int = 0, conflicts: int = 0) -> dict:
     return {
-        "id": s.id, "filename": s.filename, "sha256": s.sha256, "status": s.status, "error": s.error,
+        "id": s.id, "filename": s.filename, "mime_type": s.mime_type or "application/pdf", "sha256": s.sha256,
+        "status": s.status, "error": s.error,
         "uploaded_at": s.uploaded_at.isoformat() if s.uploaded_at else None,
         "imported_at": s.imported_at.isoformat() if s.imported_at else None,
-        "result": s.result or {}, "facts": facts, "conflicts": conflicts,
+        "result": s.result or {}, "report": s.report or (s.result or {}).get("report", []),
+        "facts": facts, "conflicts": conflicts,
     }
 
 
@@ -214,16 +236,20 @@ def list_resume_sources(db: Session = Depends(get_db)):
                  .group_by(CandidateFactSource.resume_source_id).all())
     conflicts = dict(db.query(FactConflict.resume_source_id, func.count())
                      .filter(FactConflict.status == "open").group_by(FactConflict.resume_source_id).all())
+    statuses = dict(db.query(ResumeSource.status, func.count()).group_by(ResumeSource.status).all())
     return {
         "sources": [_source_dict(s, facts.get(s.id, 0), conflicts.get(s.id, 0)) for s in sources],
         "importing": bool(is_running(EV.IMPORT_JOB)),
+        "progress": {"total": len(sources), "pending": statuses.get("pending", 0),
+                     "parsing": statuses.get("parsing", 0), "imported": statuses.get("imported", 0),
+                     "failed": statuses.get("failed", 0)},
         "open_conflicts": db.query(FactConflict).filter(FactConflict.status == "open").count(),
     }
 
 
 @router.post("/resumes", status_code=202)
 async def upload_resume_sources(files: list[UploadFile] = File(...), db: Session = Depends(get_db)):
-    """Drop in several historical résumés at once.
+    """Drop career documents into the Knowledge Bank at once.
 
     Text is extracted here (offline, fast) so the PDF bytes need not be kept; the
     LLM structuring and the reconciliation run in one background job over every
@@ -231,9 +257,10 @@ async def upload_resume_sources(files: list[UploadFile] = File(...), db: Session
     open. A file already in the library is reported, not imported twice — sha256
     is what makes re-dropping a folder harmless.
     """
-    from backend.api.routes_resumes import check_pdf_name, check_pdf_size, extract_pdf_text
+    from backend.api.routes_resumes import check_pdf_size, extract_pdf_text
+    from backend.copilot.knowledge import SUPPORTED_EXTENSIONS, extract_document_text, mime_type_for
     if not files:
-        raise HTTPException(400, "choose at least one PDF")
+        raise HTTPException(400, "choose at least one document")
     if len(files) > MAX_BATCH:
         raise HTTPException(400, f"upload at most {MAX_BATCH} résumés at a time")
 
@@ -241,7 +268,13 @@ async def upload_resume_sources(files: list[UploadFile] = File(...), db: Session
     for upload in files:
         name = getattr(upload, "filename", "") or "resume.pdf"
         try:
-            check_pdf_name(name)
+            suffix = "." + name.rsplit(".", 1)[-1].lower() if "." in name else ""
+            if suffix not in SUPPORTED_EXTENSIONS:
+                raise HTTPException(400, "Only PDF, Markdown, TXT, and DOCX files are accepted")
+            # Keep rejecting the malformed MIME shape used by the retired
+            # résumé-only client while accepting normal browser MIME values.
+            if suffix != ".pdf" and getattr(upload, "content_type", "") == "application/pdf":
+                raise HTTPException(400, "The uploaded MIME type does not match the document extension")
             pdf = await upload.read()
             check_pdf_size(pdf)
             sha = EV.digest(pdf)
@@ -250,8 +283,9 @@ async def upload_resume_sources(files: list[UploadFile] = File(...), db: Session
                 skipped.append({"filename": name, "reason": f"already in the library as {existing.filename}",
                                 "id": existing.id})
                 continue
-            row = ResumeSource(filename=name[:255], sha256=sha, status="pending",
-                               parsed_text=extract_pdf_text(pdf))
+            parsed_text = extract_pdf_text(pdf) if suffix == ".pdf" else extract_document_text(pdf, name)
+            row = ResumeSource(filename=name[:255], mime_type=mime_type_for(name), sha256=sha,
+                               status="pending", parsed_text=parsed_text)
             db.add(row)
             db.flush()
             accepted.append(_source_dict(row))
@@ -265,11 +299,57 @@ async def upload_resume_sources(files: list[UploadFile] = File(...), db: Session
     run_id = None
     if accepted:
         try:
-            run_id = launch_background(EV.IMPORT_JOB, EV.import_pending, trigger="manual")
+            run_id = launch_background(EV.IMPORT_JOB, EV.import_pending, trigger="manual",
+                                       scope_key=f"batch:{uuid.uuid4()}",
+                                       func_kwargs={"source_ids": [s["id"] for s in accepted]})
         except JobAlreadyRunningError:
-            pass   # the running job picks up everything still pending, including these
+            # The scope is unique per upload, so this is only a defensive guard.
+            logger.warning("résumé import launch was already running unexpectedly")
     return {"accepted": accepted, "skipped": skipped, "rejected": rejected,
             "run_id": run_id, "importing": bool(accepted) or bool(is_running(EV.IMPORT_JOB))}
+
+
+@router.post("/resumes/reprocess")
+async def reprocess_resume_sources(body: dict | None = None, db: Session = Depends(get_db)):
+    """Re-run extraction/reconciliation from stored parsed text without re-uploading PDFs."""
+    body = body or {}
+    requested = body.get("source_id")
+    q = db.query(ResumeSource)
+    if requested not in (None, ""):
+        row = db.get(ResumeSource, int(requested))
+        if not row:
+            raise HTTPException(404, "résumé source not found")
+        rows = [row]
+    else:
+        rows = q.order_by(ResumeSource.id).all()
+    ids = []
+    for row in rows:
+        if not (row.parsed_text or row.parsed_json):
+            continue
+        row.status, row.error = "pending", None
+        ids.append(row.id)
+    db.commit()
+    if not ids:
+        return {"accepted": 0, "run_id": None, "message": "No stored résumé text is available to reprocess"}
+    run_id = launch_background(EV.IMPORT_JOB, EV.import_pending, trigger="manual",
+                               scope_key=f"reprocess:{uuid.uuid4()}",
+                               func_kwargs={"source_ids": ids})
+    return {"accepted": len(ids), "source_ids": ids, "run_id": run_id}
+
+
+@router.post("/resumes/{source_id}/retry")
+async def retry_resume_source(source_id: int, db: Session = Depends(get_db)):
+    row = db.get(ResumeSource, source_id)
+    if not row:
+        raise HTTPException(404, "résumé source not found")
+    if row.status not in {"failed", "waiting_for_ai"}:
+        raise HTTPException(409, "only failed or AI-waiting document imports can be retried")
+    row.status, row.error = "pending", None
+    db.commit()
+    run_id = launch_background(EV.IMPORT_JOB, EV.import_pending, trigger="manual",
+                               scope_key=f"retry:{source_id}:{uuid.uuid4()}",
+                               func_kwargs={"source_ids": [source_id]})
+    return {"source_id": source_id, "run_id": run_id}
 
 
 @router.delete("/resumes/{source_id}")
@@ -360,7 +440,7 @@ async def import_profile(request: Request, file: Optional[UploadFile] = File(Non
         db.add(source)
         db.flush()
     tally = EV.reconcile(db, EV.facts_from_resume_json(json_data), source)
-    source.result, source.status, source.imported_at = tally, "imported", utcnow()
+    source.result, source.report, source.status, source.imported_at = tally, tally.get("report", []), "imported", utcnow()
     result = {**tally, "created": tally[EV.Outcome.NOVEL],
               "skipped": tally[EV.Outcome.DUPLICATE] + tally["dropped"],
               "source_id": source.id}

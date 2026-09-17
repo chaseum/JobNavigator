@@ -506,15 +506,14 @@ async def run(search: Search) -> dict:
 
                 # Dual dedup: check both application URL and levels.fyi URL
                 ext_id = make_external_id(j["company"], j["title"], job_url)
-                if ext_id in existing_ids:
+                content_hash = make_content_hash(j["company"], j["title"])
+                if ext_id in existing_ids or content_hash in existing_ids:
                     continue
                 # Also check the other URL format to handle transition from old data
                 if apply_url and apply_url != levelsfyi_url:
                     alt_id = make_external_id(j["company"], j["title"], levelsfyi_url)
                     if alt_id in existing_ids:
                         continue
-
-                content_hash = make_content_hash(j["company"], j["title"])
 
                 job = Job(
                     external_id=ext_id,
@@ -564,7 +563,7 @@ async def run(search: Search) -> dict:
                         db.add(job)
                         db.flush()
                     new_jobs += 1
-                    existing_ids.add(ext_id)
+                    existing_ids.update((ext_id, content_hash))
                 except IntegrityError:
                     logger.debug(f"Duplicate external_id for '{j['title']}' at {j.get('company')}, skipping")
                     continue

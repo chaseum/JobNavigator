@@ -295,6 +295,8 @@ def create_application(
         # (the popup reads them off the page); the URL still identifies it
         from backend.api.routes_autofill import match_job
         job = match_job(db, data.url)
+    if job is not None:
+        job.externally_added_at = job.externally_added_at or utcnow()
     if not job:
         job = Job(
             external_id=external_id,
@@ -302,6 +304,7 @@ def create_application(
             title=data.title,
             url=data.url,
             source="manual",   # APPS-15: hand-logged via the Log modal / extension, not a scrape
+            externally_added_at=utcnow(),
             status="applied",
             location=data.location or None,
             seen=True,

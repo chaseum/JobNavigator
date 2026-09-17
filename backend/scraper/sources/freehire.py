@@ -172,12 +172,13 @@ async def run(search: Search) -> dict:
                 if not job_url:
                     continue
                 ext_id = make_external_id(j["company"], j["title"], job_url)
-                if ext_id in existing_ids:
+                content_hash = make_content_hash(j["company"], j["title"])
+                if ext_id in existing_ids or content_hash in existing_ids:
                     continue
 
                 job = Job(
                     external_id=ext_id,
-                    content_hash=make_content_hash(j["company"], j["title"]),
+                    content_hash=content_hash,
                     company=j["company"],
                     title=j["title"],
                     url=job_url,
@@ -213,7 +214,7 @@ async def run(search: Search) -> dict:
                         db.add(job)
                         db.flush()
                     new_jobs += 1
-                    existing_ids.add(ext_id)
+                    existing_ids.update((ext_id, content_hash))
                 except IntegrityError:
                     logger.debug(f"Duplicate external_id for '{j['title']}' @ {j.get('company')}, skipping")
                     continue

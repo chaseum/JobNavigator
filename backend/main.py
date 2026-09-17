@@ -58,6 +58,17 @@ async def lifespan(app: FastAPI):
     # Clean up stale job runs from previous process
     cleanup_stale_runs()
 
+    # A crashed parser can leave sources in `parsing`; restore and queue the
+    # exact durable source IDs so a restart cannot strand résumé evidence.
+    try:
+        from backend.copilot.evidence import recover_resume_imports, import_pending, IMPORT_JOB
+        recovered = recover_resume_imports()
+        if recovered:
+            launch_background(IMPORT_JOB, import_pending, trigger="recovery",
+                               scope_key="startup-recovery", func_kwargs={"source_ids": recovered})
+    except Exception as e:
+        logger.warning("Résumé import recovery could not start: %s", e)
+
     # Start scheduler
     from backend.scheduler import scheduler, configure_scheduler
     configure_scheduler()

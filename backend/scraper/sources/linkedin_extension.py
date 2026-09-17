@@ -231,7 +231,7 @@ async def enrich(linkedin_ids: list[str], db=None):
                     c_hash = make_content_hash(company, title)
                     alt_ext_id = make_external_id(company, title, linkedin_url) if apply_url else None
 
-                    if ext_id in existing_ext_ids:
+                    if ext_id in existing_ext_ids or c_hash in existing_ext_ids:
                         skipped += 1
                         continue
                     if alt_ext_id and alt_ext_id in existing_ext_ids:
@@ -284,7 +284,7 @@ async def enrich(linkedin_ids: list[str], db=None):
                     db.add(job)
                     db.commit()
                     imported += 1
-                    existing_ext_ids.add(ext_id)
+                    existing_ext_ids.update((ext_id, c_hash))
                     logger.info(f"LinkedIn {lid}: imported '{title}' at '{company}' -> {job_url[:80]}")
 
                 except Exception as e:

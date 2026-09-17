@@ -38,8 +38,8 @@
       {\textbf{((( e.heading )))}((* if e.subheading *)) $|$ \emph{((( e.subheading )))}((* endif *))}{((( e.date )))}
 ((* else *))
     \resumeSubheading
-      {((( e.heading )))}{((( e.date )))}
-      {((( e.subheading )))}{((( e.location )))}
+      {((( e.title if e.title is defined else (e.research_title if e.research_title is defined else e.heading) )))}{((( e.date )))}
+      {((( e.employer if e.employer is defined else (e.organization if e.organization is defined else e.subheading) )))}{((( e.location )))}
 ((* endif *))
 ((* if e.bullets *))
       \resumeItemListStart

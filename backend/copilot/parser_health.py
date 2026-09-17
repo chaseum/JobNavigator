@@ -63,7 +63,15 @@ def check(raw_text: str, resume: dict) -> dict:
     for label, sec_ids, field in (("Company names extracted", ("experience",), "heading"),
                                   ("Job titles extracted", ("experience",), "subheading"),
                                   ("Schools extracted", ("education",), "heading")):
-        wanted = [e.get(field) for s, e in entries if s.get("id") in sec_ids and e.get(field)]
+        wanted = []
+        for s, e in entries:
+            if s.get("id") not in sec_ids:
+                continue
+            # Jake's semantic mapping places title above employer. Accept both
+            # fields here so health checks validate extraction, not old heading
+            # terminology.
+            fields = ("heading", "subheading") if s.get("id") == "experience" else (field,)
+            wanted.extend(e.get(name) for name in fields if e.get(name))
         lost = [w for w in wanted if not _found(w, hay)]
         add(label, not lost, f"missing: {', '.join(lost)}" if lost else ("none on this résumé" if not wanted else ""))
 

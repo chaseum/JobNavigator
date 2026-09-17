@@ -29,6 +29,7 @@ const TABS = [
   ['recommended', 'Recommended', 'new,saved'],
   ['saved', 'Saved', 'saved'],
   ['applied', 'Applied', 'applied'],
+  ['external', 'External', 'new,saved', 'external'],
 ]
 // DATE_OPTS / YEARS_OPTS / COUNTRY_OPTS come from jobPrefs.js so the Jobs chips and
 // the Settings form offer exactly the same choices.
@@ -173,7 +174,8 @@ function JobCard({ job, analyzing, onSave, onHide, onAnalyze, onRematch }) {
           <Logo company={job.company} />
           <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 3 }}>
             <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', minHeight: 19 }}>
-              {job.discovered_at && <Tag title={`Found by JobNavigator ${new Date(job.discovered_at).toLocaleString()}`}>{ago(job.discovered_at)}</Tag>}
+              {job.externally_added ? <Tag tone="accent" title="Added by you from an external URL or the extension">Added externally</Tag>
+                : job.discovered_at && <Tag title={`Found by JobNavigator ${new Date(job.discovered_at).toLocaleString()}`}>{ago(job.discovered_at)}</Tag>}
               {fresh && job.status === 'new' && <Tag tone="accent">New</Tag>}
               {job.status === 'applied' && <Tag tone="good">Applied</Tag>}
               {job.h1b_verdict === 'likely' && <Tag title="Company files H-1B petitions">H-1B likely</Tag>}
@@ -236,6 +238,7 @@ export default function Jobs() {
   // `places` is the facet picker's selection, `q` is the search box as typed.
   const [places, setPlaces] = useState(view.places || [])
   const [q, setQ] = useState('')
+  const [externalUrl, setExternalUrl] = useState('')
   const [dq, setDq] = useState('')
   const [open, setOpen] = useState(null)
   const [locQ, setLocQ] = useState('')
@@ -263,6 +266,8 @@ export default function Jobs() {
   const params = useMemo(() => {
     if (!prefs) return null
     const p = { status: TABS.find(([k]) => k === tab)[2] }
+    const tabDef = TABS.find(([k]) => k === tab)
+    if (tabDef?.[3]) p.origin = tabDef[3]
     if (dq) p.title_search = dq
     if (tab === 'recommended') p.recommended = 1
     if (prefs.job_functions.length) p.job_function = prefs.job_functions.join(',')
@@ -375,7 +380,7 @@ export default function Jobs() {
   }
 
   const statusCount = Object.fromEntries((facets.statuses || []).map((x) => [x.name, x.count]))
-  const tabCount = { recommended: (statusCount.new || 0) + (statusCount.saved || 0), saved: statusCount.saved || 0, applied: statusCount.applied || 0 }
+  const tabCount = { recommended: (statusCount.new || 0) + (statusCount.saved || 0), saved: statusCount.saved || 0, applied: statusCount.applied || 0, external: statusCount.new || 0 }
   const countOf = (list, name) => (list || []).find((x) => x.name === name)?.count
   const labelsOf = (ids, options) => (options || []).filter((o) => (ids || []).includes(o.id)).map((o) => o.label)
   const multiLabel = (base, ids, options) => {
@@ -440,6 +445,11 @@ export default function Jobs() {
               title="Look for new jobs using your current preferences">
               {refreshing ? 'Refreshing…' : 'Refresh jobs'}
             </Button>
+            <Input value={externalUrl} onChange={setExternalUrl} placeholder="Paste external job URL" ariaLabel="External job URL" width="220px" />
+            <Button size="sm" disabled={!externalUrl.trim()} onClick={async () => {
+              try { await api.post('/jobs/external', { url: externalUrl.trim() }); setExternalUrl(''); pushToast({ kind: 'success', msg: 'External job added' }); setTab('external'); load(false) }
+              catch (e) { pushToast({ kind: 'error', msg: errMsg(e, 'Could not add external job') }) }
+            }}>Add</Button>
           </span>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', padding: '10px 24px', borderTop: '1px solid var(--line-soft)' }}>

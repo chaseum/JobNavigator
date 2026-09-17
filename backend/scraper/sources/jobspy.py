@@ -408,11 +408,10 @@ def _run_sync(search, proxy_url: str = None) -> dict:
                 url = url or ""
                 source_url = source_url or ""
                 ext_id = make_external_id(company, title, source_url)
-
-                if ext_id in existing_ids:
-                    continue
-
                 content_hash = make_content_hash(company, title)
+
+                if ext_id in existing_ids or content_hash in existing_ids:
+                    continue
 
                 site = str(row.get("site", "")).lower()
                 source_map = {
@@ -477,7 +476,7 @@ def _run_sync(search, proxy_url: str = None) -> dict:
                         db.flush()
                     new_jobs += 1
                     breakdown.setdefault(site or "unknown", {"seen": 0, "new": 0})["new"] += 1
-                    existing_ids.add(ext_id)
+                    existing_ids.update((ext_id, content_hash))
                 except IntegrityError:
                     logger.debug(f"Duplicate external_id for '{title}' at {company}, skipping")
                     continue
@@ -494,8 +493,9 @@ def _run_sync(search, proxy_url: str = None) -> dict:
                     url = url or ""
                     source_url = source_url or ""
                     ext_id = make_external_id(company, title, source_url)
+                    content_hash = make_content_hash(company, title)
 
-                    if ext_id in existing_ids:
+                    if ext_id in existing_ids or content_hash in existing_ids:
                         continue
 
                     site = str(row.get("site", "")).lower()
@@ -509,6 +509,7 @@ def _run_sync(search, proxy_url: str = None) -> dict:
 
                     job = Job(
                         external_id=ext_id,
+                        content_hash=content_hash,
                         company=company,
                         title=title,
                         url=url,
@@ -527,7 +528,7 @@ def _run_sync(search, proxy_url: str = None) -> dict:
                         with db.begin_nested():
                             db.add(job)
                             db.flush()
-                        existing_ids.add(ext_id)
+                        existing_ids.update((ext_id, content_hash))
                         ignored_jobs += 1
                         entry = breakdown.setdefault(site or "unknown", {"seen": 0, "new": 0})
                         entry["filtered"] = entry.get("filtered", 0) + 1

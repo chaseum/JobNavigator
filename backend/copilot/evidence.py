@@ -21,6 +21,7 @@ case C. Achievements are matched only against their own parent's children, so th
 same bullet under two different jobs stays two facts.
 """
 import hashlib
+import json
 import logging
 import re
 import unicodedata
@@ -147,6 +148,7 @@ class Outcome:
     ENRICHED = "enriched"        # B
     CONFLICT = "conflict"        # C
     NOVEL = "novel"              # D
+    REVIEW = "review"            # extracted source data needs user resolution
 
 
 def normalizer_for(kind: str, field: str):
@@ -242,17 +244,74 @@ def _match(db, kind: str, data: dict, parent_id):
     Achievements are only ever compared with their own parent's children, so the
     same bullet under two different jobs stays two facts with two parents.
     """
+    if kind == "achievement":
+        return _match_achievement(db, data, parent_id)
     q = db.query(CandidateFact).filter(CandidateFact.kind.in_(kinds_in_group(group_of(kind))))
     if group_of(kind) == "achievement":
         q = q.filter(CandidateFact.parent_id == parent_id)
     loose = None
     for row in q.order_by(CandidateFact.id).all():
+        if (group_of(kind) == "employment" and
+                (row.data or {}).get("title") == "Role" and data.get("title") and
+                norm_org((row.data or {}).get("employer")) == norm_org(data.get("employer"))):
+            return row
         if not same_entity(kind, data, row.data or {}):
+            # A real user-entered title at the same employer is a conflict,
+            # not permission to fork a second canonical employment row.
+            if (group_of(kind) == "employment" and
+                    norm_org((row.data or {}).get("employer")) == norm_org(data.get("employer"))):
+                loose = loose or row
             continue
         if identity(kind, data) == identity(row.kind, row.data or {}):
             return row
         loose = loose or row
     return loose
+
+
+_BULLET_NUMBER_RE = re.compile(r"\$?\d[\d,.]*(?:\s*[%KMBkmb+])*")
+_BULLET_WORD_RE = re.compile(r"[a-zA-Z]+")
+_BULLET_STOPWORDS = {"a", "an", "the", "and", "or", "of", "to", "in", "on", "at", "by", "for", "with", "from", "as", "is", "was", "were", "be", "via"}
+
+
+def bullet_numeric_anchors(text: str) -> set[str]:
+    return {x.replace(" ", "") for x in _BULLET_NUMBER_RE.findall(text or "")}
+
+
+def bullet_similarity(left: str, right: str) -> float:
+    """Deterministic similarity shared by evidence and résumé merging."""
+    a = {w for w in _BULLET_WORD_RE.findall((left or "").casefold()) if w not in _BULLET_STOPWORDS}
+    b = {w for w in _BULLET_WORD_RE.findall((right or "").casefold()) if w not in _BULLET_STOPWORDS}
+    jaccard = len(a & b) / len(a | b) if a and b else 0.0
+    return jaccard
+
+
+def bullet_match(left: str, right: str) -> tuple[bool, bool]:
+    """Return (duplicate, numeric_conflict). Exact normalized text always matches."""
+    if norm_text(left) == norm_text(right):
+        return True, False
+    def anchors(text):
+        values = {x.casefold() for x in bullet_numeric_anchors(text)}
+        for number in re.findall(r"\d[\d,.]*", text or ""):
+            if re.search(rf"{re.escape(number)}\s*percent", text or "", re.I):
+                values.discard(number.casefold())
+                values.add(number.replace(",", "") + "%")
+        return values
+    a, b = anchors(left), anchors(right)
+    if a and b and a != b:
+        return False, True
+    return bullet_similarity(left, right) >= (0.40 if a else 0.50), False
+
+
+def _match_achievement(db, data: dict, parent_id):
+    """Compare bullets only among children of the same canonical parent."""
+    text = str(data.get("text") or "")
+    for row in (db.query(CandidateFact)
+                .filter(CandidateFact.kind == "achievement", CandidateFact.parent_id == parent_id)
+                .order_by(CandidateFact.id).all()):
+        duplicate, _ = bullet_match(text, (row.data or {}).get("text", ""))
+        if duplicate:
+            return row
+    return None
 
 
 def reconcile_item(db, item: dict, source, parent: CandidateFact | None = None) -> tuple[CandidateFact | None, str]:
@@ -261,7 +320,7 @@ def reconcile_item(db, item: dict, source, parent: CandidateFact | None = None) 
     try:
         data = F.validate_data(kind, item.get("data") or {})
     except ValueError as e:
-        logger.info(f"evidence import: dropped {kind}: {e}")
+        logger.info(f"evidence import requires review for {kind}: {e}")
         return None, "dropped"
 
     parent_id = parent.id if parent is not None else None
@@ -272,9 +331,25 @@ def reconcile_item(db, item: dict, source, parent: CandidateFact | None = None) 
         db.add(row)
         db.flush()
         _link(db, row, source, item.get("locator", ""), item.get("raw", ""))
+        if kind == "achievement":
+            for old in (db.query(CandidateFact)
+                        .filter(CandidateFact.kind == "achievement", CandidateFact.parent_id == parent_id,
+                                CandidateFact.id != row.id).all()):
+                similar, numeric_conflict = bullet_match(data.get("text", ""), (old.data or {}).get("text", ""))
+                if numeric_conflict:
+                    _raise_conflict(db, row, source, "text", (old.data or {}).get("text", ""), data.get("text", ""))
+                    return row, Outcome.CONFLICT
         return row, Outcome.NOVEL
 
-    merged, gained, conflicts = merge(row.data or {}, data, kind)
+    stored = dict(row.data or {})
+    # Repair only the legacy import sentinels. Arbitrary user-entered values
+    # remain real values and therefore still produce conflicts.
+    if kind in ("experience", "internship"):
+        if stored.get("title") == "Role" and data.get("title"):
+            stored["title"] = ""
+        if stored.get("employer") == "Unknown" and data.get("employer"):
+            stored["employer"] = ""
+    merged, gained, conflicts = merge(stored, data, kind)
     if gained:
         row.data = merged
         row.updated_at = utcnow()
@@ -285,15 +360,30 @@ def reconcile_item(db, item: dict, source, parent: CandidateFact | None = None) 
 
 def reconcile(db, items: list, source=None) -> dict:
     """Fold one résumé's extracted items into the canonical facts; returns a per-outcome tally."""
-    tally = {Outcome.NOVEL: 0, Outcome.ENRICHED: 0, Outcome.DUPLICATE: 0, Outcome.CONFLICT: 0, "dropped": 0}
+    tally = {Outcome.NOVEL: 0, Outcome.ENRICHED: 0, Outcome.DUPLICATE: 0,
+             Outcome.CONFLICT: 0, Outcome.REVIEW: 0, "dropped": 0, "report": []}
+    def report(item, fact, outcome, parent=None):
+        data = item.get("data") or {}
+        headline = (data.get("title") or data.get("name") or data.get("text") or
+                    data.get("institution") or data.get("organization") or data.get("employer") or "")
+        tally["report"].append({"kind": item.get("kind"), "fact_id": fact.id if fact else None,
+                                 "parent_id": parent.id if parent else None, "headline": headline,
+                                 "outcome": outcome, "source": getattr(source, "filename", None),
+                                 "locator": item.get("locator", "")})
     for item in items or []:
         fact, outcome = reconcile_item(db, item, source)
         tally[outcome] = tally.get(outcome, 0) + 1
+        if outcome == "dropped":
+            tally[Outcome.REVIEW] += 1
+        report(item, fact, outcome)
         if fact is None:
             continue
         for child in item.get("children") or []:
-            _, child_outcome = reconcile_item(db, child, source, parent=fact)
+            child_fact, child_outcome = reconcile_item(db, child, source, parent=fact)
             tally[child_outcome] = tally.get(child_outcome, 0) + 1
+            if child_outcome == "dropped":
+                tally[Outcome.REVIEW] += 1
+            report(child, child_fact, child_outcome, fact)
     return tally
 
 
@@ -360,12 +450,18 @@ def facts_from_resume_json(json_data: dict) -> list[dict]:
         if not isinstance(e, dict) or not (e.get("company") or e.get("title")):
             continue
         loc = f"experience[{i}]"
-        start, end = parse_date_range(e.get("date") or e.get("dates") or "")
-        title = str(e.get("title") or "").strip() or "Role"
+        start = str(e.get("start_date") or "").strip()
+        end = str(e.get("end_date") or "").strip()
+        if not (start or end):
+            start, end = parse_date_range(e.get("date") or e.get("dates") or "")
+        title = str(e.get("title") or "").strip()
+        employer = str(e.get("company") or "").strip()
         out.append({
             "kind": "internship" if "intern" in title.lower() else "experience",
-            "data": {"employer": str(e.get("company") or "").strip() or "Unknown", "title": title,
+            "data": {"employer": employer, "title": title,
                      "location": str(e.get("location") or ""), "start_date": start, "end_date": end,
+                     "employment_type": str(e.get("employment_type") or ""),
+                     "technologies": _split_list(e.get("technologies")),
                      "description": str(e.get("description") or ""),
                      "notes": "" if start else f"Imported date: {e.get('date') or ''}".strip(": ")},
             "locator": loc, "raw": f"{title} — {e.get('company') or ''} ({e.get('date') or ''})",
@@ -374,20 +470,34 @@ def facts_from_resume_json(json_data: dict) -> list[dict]:
     for i, ed in enumerate((json_data or {}).get("education") or []):
         if not isinstance(ed, dict) or not ed.get("school"):
             continue
-        _, grad = parse_date_range(ed.get("years") or ed.get("year") or "")
+        start, grad = str(ed.get("start_date") or "").strip(), str(ed.get("graduation_date") or "").strip()
+        if not (start or grad):
+            start, grad = parse_date_range(ed.get("years") or ed.get("year") or "")
+            # A lone year/date is a graduation date, not an education start.
+            if start and not grad:
+                grad, start = start, ""
         if not grad:
             grad = _one_date(str(ed.get("years") or ed.get("year") or ""))
         out.append({"kind": "education", "locator": f"education[{i}]",
                     "raw": f"{ed.get('degree') or ''} — {ed['school']} ({ed.get('years') or ed.get('year') or ''})",
                     "data": {"institution": str(ed["school"]).strip(), "degree": str(ed.get("degree") or ""),
+                             "major": str(ed.get("major") or ""), "minor": str(ed.get("minor") or ""),
+                             "gpa": str(ed.get("gpa") or ""), "start_date": start,
                              "location": str(ed.get("location") or ""),
-                             "graduation_date": grad if grad != "present" else ""}})
+                             "graduation_date": grad if grad != "present" else "",
+                             "coursework": _split_list(ed.get("coursework")), "honors": _split_list(ed.get("honors"))}})
     for i, pr in enumerate((json_data or {}).get("projects") or []):
         if not isinstance(pr, dict) or not pr.get("name"):
             continue
         loc = f"projects[{i}]"
         out.append({"kind": "project", "locator": loc, "raw": str(pr["name"]).strip(),
-                    "data": {"name": str(pr["name"]).strip(), "description": str(pr.get("description") or "")},
+                    "data": {"name": str(pr["name"]).strip(), "role": str(pr.get("role") or ""),
+                             "description": str(pr.get("description") or ""),
+                             "technologies": _split_list(pr.get("technologies")),
+                             "repository_url": str(pr.get("repository_url") or ""),
+                             "project_url": str(pr.get("project_url") or ""),
+                             "start_date": str(pr.get("start_date") or ""),
+                             "end_date": str(pr.get("end_date") or "")},
                     "children": _bullets(pr.get("bullets"), loc)})
     skills = (json_data or {}).get("skills") or {}
     groups = skills.items() if isinstance(skills, dict) else [("", skills)]
@@ -399,7 +509,35 @@ def facts_from_resume_json(json_data: dict) -> list[dict]:
         if isinstance(pub, dict) and pub.get("title"):
             out.append({"kind": "publication", "locator": f"publications[{i}]", "raw": str(pub["title"]).strip(),
                         "data": {"title": str(pub["title"]).strip(),
-                                 "venue": str(pub.get("description") or pub.get("venue") or "")}})
+                                 "venue": str(pub.get("description") or pub.get("venue") or ""),
+                                 "date": str(pub.get("date") or ""), "authors": str(pub.get("authors") or ""),
+                                 "url": str(pub.get("url") or "")}})
+    for i, research in enumerate((json_data or {}).get("research") or []):
+        if not isinstance(research, dict) or not research.get("organization"):
+            continue
+        loc = f"research[{i}]"
+        start = str(research.get("start_date") or "").strip()
+        end = str(research.get("end_date") or "").strip()
+        if not (start or end):
+            start, end = parse_date_range(research.get("date") or "")
+        out.append({"kind": "research", "locator": loc,
+                    "raw": f"{research.get('title') or ''} — {research.get('organization')}",
+                    "data": {"organization": str(research.get("organization") or "").strip(),
+                             "title": str(research.get("title") or "").strip(),
+                             "location": str(research.get("location") or ""), "start_date": start, "end_date": end,
+                             "research_area": str(research.get("research_area") or ""),
+                             "methods": _split_list(research.get("methods")),
+                             "technologies": _split_list(research.get("technologies")),
+                             "responsibilities": [], "publications": _split_list(research.get("publications"))},
+                    "children": _bullets(research.get("bullets"), loc)})
+    for i, cert in enumerate((json_data or {}).get("certifications") or []):
+        if isinstance(cert, dict) and cert.get("name"):
+            out.append({"kind": "certification", "locator": f"certifications[{i}]", "raw": str(cert["name"]),
+                        "data": {k: str(cert.get(k) or "") for k in ("name", "issuer", "date", "expires", "credential_url")}})
+    for i, link in enumerate((json_data or {}).get("links") or []):
+        if isinstance(link, dict) and link.get("url"):
+            out.append({"kind": "link", "locator": f"links[{i}]", "raw": str(link["url"]),
+                        "data": {"label": str(link.get("label") or ""), "url": str(link["url"]).strip()}})
     return out
 
 
@@ -415,15 +553,15 @@ def digest(pdf_bytes: bytes) -> str:
 IMPORT_JOB = "resume_import"
 
 
-async def import_pending() -> str:
-    """Structure and reconcile every pending résumé source; returns a one-line summary."""
-    from backend.api.routes_resumes import parse_resume_text
+async def import_pending(source_ids: list[int] | None = None) -> str:
+    """Structure exactly ``source_ids``; an omitted list is a recovery scan."""
+    from backend.copilot.knowledge import extract_claims, index_document, index_facts
     from backend.models.db import SessionLocal
 
     db = SessionLocal()
     try:
-        pending = [s.id for s in db.query(ResumeSource).filter(ResumeSource.status == "pending")
-                   .order_by(ResumeSource.id).all()]
+        q = db.query(ResumeSource).filter(ResumeSource.status == "pending")
+        pending = [s.id for s in q.order_by(ResumeSource.id).all()] if source_ids is None else list(source_ids)
     finally:
         db.close()
 
@@ -435,18 +573,20 @@ async def import_pending() -> str:
             if source is None or source.status != "pending":
                 continue
             source.status = "parsing"
-            text = source.parsed_text or ""
+            text = source.parsed_text or json.dumps(source.parsed_json or {}, sort_keys=True)
             db.commit()
         finally:
             db.close()
 
         try:
-            parsed = await parse_resume_text(text, None)
+            from backend.job_monitor import get_limiter
+            async with get_limiter("resume_parsing"):
+                parsed, provider, model = await extract_claims(text)
         except Exception as e:
             db = SessionLocal()
             try:
                 source = db.get(ResumeSource, source_id)
-                source.status, source.error = "failed", str(getattr(e, "detail", e))[:500]
+                source.status, source.error = "waiting_for_ai", str(getattr(e, "detail", e))[:500]
                 db.commit()
             finally:
                 db.close()
@@ -457,13 +597,24 @@ async def import_pending() -> str:
         db = SessionLocal()
         try:
             source = db.get(ResumeSource, source_id)
-            tally = reconcile(db, facts_from_resume_json(parsed), source)
-            source.parsed_json, source.result = parsed, tally
-            source.status, source.imported_at, source.error = "imported", utcnow(), None
-            _fill_contact(db, (parsed or {}).get("header") or {})
+            tally = reconcile(db, parsed, source)
+            source.parsed_json, source.result, source.report = {"claims": parsed}, tally, tally.get("report", [])
+            source.status, source.imported_at, source.processed_at, source.error = "imported", utcnow(), utcnow(), None
             db.commit()
+            # Embeddings are useful but must not discard a source when Ollama is
+            # offline. The document and canonical claims remain durable.
+            try:
+                await index_document(db, source_id)
+                await index_facts(db)
+                db.commit()
+            except Exception as embedding_error:
+                source = db.get(ResumeSource, source_id)
+                source.status = "waiting_for_ai"
+                source.processing_error = f"Embedding unavailable: {str(embedding_error)[:400]}"
+                db.commit()
             for key, count in tally.items():
-                totals[key] = totals.get(key, 0) + count
+                if isinstance(count, int):
+                    totals[key] = totals.get(key, 0) + count
             done += 1
         except Exception as e:
             db.rollback()
@@ -480,8 +631,24 @@ async def import_pending() -> str:
     if failed:
         parts.append(f"{failed} failed")
     parts.append(f"{totals.get(Outcome.NOVEL, 0)} new facts, {totals.get(Outcome.ENRICHED, 0)} enriched, "
-                 f"{totals.get(Outcome.DUPLICATE, 0)} already known, {totals.get(Outcome.CONFLICT, 0)} conflicts to review")
+                 f"{totals.get(Outcome.DUPLICATE, 0)} already known, {totals.get(Outcome.CONFLICT, 0)} conflicts to review, "
+                 f"{totals.get(Outcome.REVIEW, 0)} needing review")
     return "; ".join(parts)
+
+
+def recover_resume_imports() -> list[int]:
+    """Restore sources interrupted by a prior process and queue their exact IDs."""
+    from backend.models.db import SessionLocal
+    db = SessionLocal()
+    try:
+        rows = db.query(ResumeSource).filter(ResumeSource.status.in_(["pending", "parsing"])).all()
+        for row in rows:
+            row.status = "pending"
+        ids = [row.id for row in rows]
+        db.commit()
+        return ids
+    finally:
+        db.close()
 
 
 def _fill_contact(db, header: dict) -> int:

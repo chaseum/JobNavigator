@@ -8,7 +8,7 @@ from sqlalchemy import (
     ForeignKey, JSON, Index, UniqueConstraint, create_engine, text
 )
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import backref, column_property, declarative_base, deferred, relationship, sessionmaker
+from sqlalchemy.orm import backref, column_property, declarative_base, deferred, relationship, sessionmaker, synonym
 
 from backend.config import DATABASE_URL
 
@@ -167,6 +167,9 @@ class Job(Base):
     canonical_url = Column(String, nullable=True)
     apply_url = Column(String, nullable=True)
     source = Column(String, nullable=True)  # jobspy_linkedin | jobspy_indeed | etc.
+    # User intent is independent of scraper provenance. A posting may be both
+    # externally added and discovered/recommended.
+    externally_added_at = Column(DateTime(timezone=True), nullable=True, index=True)
     # SET NULL so deleting a search never orphans a stored job. No Alembic, so the
     # delete handlers null this column themselves on existing databases.
     search_id = Column(UUID(as_uuid=True), ForeignKey("searches.id", ondelete="SET NULL"), nullable=True)
@@ -586,6 +589,10 @@ class CandidateFact(Base):
     # achievement -> the experience/project/research it happened in
     parent_id = Column(Integer, ForeignKey("candidate_facts.id", ondelete="CASCADE"), nullable=True, index=True)
     data = Column(JSON, nullable=False, default=dict)
+    # JSON is enough for the personal-scale corpus; the embedding model and
+    # normalized text hash live with the claim so stale vectors are detectable.
+    embedding = Column(JSON, nullable=True)
+    embedding_text_sha256 = Column(String(64), nullable=True, index=True)
     verified = Column(Boolean, nullable=False, default=False)
     source = Column(String, nullable=False, default="manual")   # manual | gap | import:<label>
     sort_order = Column(Integer, nullable=False, default=0)
@@ -602,19 +609,46 @@ class CandidateFact(Base):
 # the link between them is kept, so any fact can say which documents support it.
 # The PDF bytes are not kept — the extracted text and the parsed JSON are what
 # reconciliation and re-imports need, and sha256 is what makes an upload idempotent.
-class ResumeSource(Base):
+class KnowledgeDocument(Base):
     __tablename__ = "resume_sources"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     filename = Column(String, nullable=False)
     sha256 = Column(String(64), nullable=False, unique=True, index=True)
-    status = Column(String(16), nullable=False, default="pending")   # pending | parsing | imported | failed
+    mime_type = Column(String(120), nullable=False, default="application/pdf")
+    status = Column(String(24), nullable=False, default="pending")   # pending | parsing | imported | waiting_for_ai | failed
     error = Column(Text, nullable=True)
     parsed_json = Column(JSON, nullable=True)
     parsed_text = deferred(Column(Text, nullable=True))
     result = Column(JSON, nullable=True)          # per-outcome tally from the last reconcile
+    report = Column(JSON, nullable=True)           # durable per-entity import explanation
     uploaded_at = Column(DateTime(timezone=True), default=utcnow)
     imported_at = Column(DateTime(timezone=True), nullable=True)
+    processed_at = Column(DateTime(timezone=True), nullable=True)
+
+    # Generic KnowledgeDocument names without duplicating the stored content or
+    # breaking callers that still use the historical ResumeSource fields.
+    raw_text = synonym("parsed_text")
+    processing_error = synonym("error")
+
+
+# Compatibility name for existing data, API clients, and tests. There is one
+# mapped document model/table, not parallel résumé and knowledge systems.
+ResumeSource = KnowledgeDocument
+
+
+class KnowledgeChunk(Base):
+    __tablename__ = "knowledge_chunks"
+    __table_args__ = (UniqueConstraint("document_id", "chunk_index", name="uq_knowledge_chunk"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    document_id = Column(Integer, ForeignKey("resume_sources.id", ondelete="CASCADE"), nullable=False, index=True)
+    chunk_index = Column(Integer, nullable=False)
+    text = Column(Text, nullable=False)
+    text_sha256 = Column(String(64), nullable=False)
+    embedding = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+    document = relationship("KnowledgeDocument", backref=backref("chunks", cascade="all, delete-orphan"))
 
 
 class CandidateFactSource(Base):
@@ -632,7 +666,7 @@ class CandidateFactSource(Base):
     # No passive_deletes: SQLite does not enforce ON DELETE CASCADE unless
     # foreign_keys is on, so the ORM clears these links itself on both backends.
     fact = relationship("CandidateFact", backref=backref("sources", cascade="all, delete-orphan"))
-    source = relationship("ResumeSource", backref=backref("fact_links", cascade="all, delete-orphan"))
+    source = relationship("KnowledgeDocument", backref=backref("fact_links", cascade="all, delete-orphan"))
 
 
 class FactConflict(Base):
@@ -651,7 +685,7 @@ class FactConflict(Base):
     resolved_at = Column(DateTime(timezone=True), nullable=True)
 
     fact = relationship("CandidateFact", backref=backref("conflicts", cascade="all, delete-orphan"))
-    source = relationship("ResumeSource")
+    source = relationship("KnowledgeDocument")
 
 
 # ── Job analysis / Role Match ────────────────────────────────────────────────
@@ -841,9 +875,9 @@ def get_global_title_exclude(db) -> list:
 
 
 def get_existing_external_ids(db) -> set:
-    """Load all external_ids from jobs table into a set for fast dedup checking."""
-    rows = db.query(Job.external_id).filter(Job.external_id != None).all()
-    return {r[0] for r in rows}
+    """Load URL and content dedup keys for fast cross-source dedup checking."""
+    rows = db.query(Job.external_id, Job.content_hash).all()
+    return {value for row in rows for value in row if value}
 
 
 

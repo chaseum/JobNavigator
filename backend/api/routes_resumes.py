@@ -79,14 +79,13 @@ def _bullet_jaccard(a: str, b: str) -> float:
 
 
 def _numeric_anchors(s: str) -> set:
-    return set(_NUMERIC_RE.findall(s or ""))
+    from backend.copilot.evidence import bullet_numeric_anchors
+    return bullet_numeric_anchors(s)
 
 
 def _is_duplicate_bullet(a: str, b: str) -> bool:
-    """Two bullets are duplicates if they share a numeric anchor and have Jaccard ≥ 0.40, or have Jaccard ≥ 0.50 with no shared anchor required."""
-    if _numeric_anchors(a) & _numeric_anchors(b):
-        return _bullet_jaccard(a, b) >= 0.40
-    return _bullet_jaccard(a, b) >= 0.50
+    from backend.copilot.evidence import bullet_match
+    return bullet_match(a, b)[0]
 
 
 def _merge_persona_experience(base_exp: list, persona_exp: list) -> list:
@@ -1271,8 +1270,10 @@ async def parse_resume_text(extracted_text: str, db: Session) -> dict:
     )
     user_prompt = (
         "Extract the candidate's header/contact details, summary, experience, skills, "
-        "education, projects, and publications from this resume. Preserve dates and "
-        "bullet wording where possible.\n\n"
+        "education, research, projects, certifications, publications, and explicit links "
+        "from this resume. Preserve date ranges and bullet wording where possible. "
+        "Never invent roles, metrics, dates, technologies, or titles; use empty fields "
+        "when the source does not state them.\n\n"
         f"Resume text:\n{extracted_text}"
     )
 
@@ -1288,7 +1289,13 @@ async def parse_resume_text(extracted_text: str, db: Session) -> dict:
             max_tokens=6000,
             temperature=0,
         )
-        return parsed.model_dump()
+        data = parsed.model_dump()
+        # Keep the legacy empty JSON shape stable for existing stored clients;
+        # populated research/certification/link sections are always retained.
+        for key in ("research", "certifications", "links"):
+            if not data.get(key):
+                data.pop(key, None)
+        return data
     except StructuredOutputError as e:
         logger.warning("Structured PDF resume extraction failed validation: %s", str(e)[:1000])
         raise HTTPException(

@@ -245,7 +245,7 @@ async def scrape_single_career_page(company: Company, shared_browser=None,
             for j in unique_jobs:
                 ext_id = make_external_id(company.name, j["title"], j["url"])
                 content_hash = make_content_hash(company.name, j["title"])
-                if ext_id in existing_ids:
+                if ext_id in existing_ids or content_hash in existing_ids:
                     known_here[ext_id] = j
                     continue
                 j["_ext_id"] = ext_id
@@ -307,7 +307,7 @@ async def scrape_single_career_page(company: Company, shared_browser=None,
                         db.flush()
                     if job.status == "new":
                         new_jobs += 1
-                    existing_ids.add(ext_id)
+                    existing_ids.update((ext_id, content_hash))
                 except IntegrityError:
                     logger.debug(f"Duplicate external_id for '{j['title']}' at {company.name}, skipping")
                     continue
@@ -318,12 +318,13 @@ async def scrape_single_career_page(company: Company, shared_browser=None,
             # Save filtered-out jobs as "ignored" for dedup purposes
             for j in filtered_out:
                 ext_id = make_external_id(company.name, j["title"], j["url"])
-                if ext_id in existing_ids:
+                content_hash = make_content_hash(company.name, j["title"])
+                if ext_id in existing_ids or content_hash in existing_ids:
                     continue
 
                 job = Job(
                     external_id=ext_id,
-                    content_hash=make_content_hash(company.name, j["title"]),
+                    content_hash=content_hash,
                     company=company.name,
                     title=j["title"],
                     url=_normalize_url(j["url"]) or j["url"],
@@ -337,7 +338,7 @@ async def scrape_single_career_page(company: Company, shared_browser=None,
                     with db.begin_nested():
                         db.add(job)
                         db.flush()
-                    existing_ids.add(ext_id)
+                    existing_ids.update((ext_id, content_hash))
                 except IntegrityError:
                     continue
                 except Exception as e:

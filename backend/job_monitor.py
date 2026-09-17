@@ -71,6 +71,9 @@ class TaskLimiter:
 _LIMIT_SOURCES: dict[str, tuple[Optional[str], int]] = {
     "scoring": ("scoring_max_concurrent", 5),
     "tailoring": ("tailoring_max_concurrent", 2),
+    # Résumé parsing is intentionally serialized: each source can be a large
+    # LLM request, and the durable source rows already provide the queue.
+    "resume_parsing": (None, 1),
     # Page caching is httpx + BeautifulSoup and, on thin pages, a whole
     # Chromium. Four at a time is the difference between ~300 MB and the 2.5 GB
     # the box hit; it is deliberately not user-tunable.
@@ -85,6 +88,7 @@ _JOB_TYPE_LIMITER: dict[str, str] = {
     "tailor_resume": "tailoring",
     "generate_cover_letter": "tailoring",
     "cache_job_page": "page_cache",
+    "resume_import": "resume_parsing",
 }
 
 _limiters: dict[str, TaskLimiter] = {}

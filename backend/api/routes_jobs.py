@@ -109,6 +109,7 @@ def list_jobs(
     location: Optional[str] = None,
     arrangement: Optional[str] = None,
     source: Optional[str] = None,
+    origin: Optional[str] = Query(None, pattern="^(discovered|external)$"),
     saved: Optional[bool] = None,
     title_search: Optional[str] = None,
     min_salary: Optional[int] = None,
@@ -163,6 +164,10 @@ def list_jobs(
     if source:
         vals = [s.strip() for s in source.split(",") if s.strip()]
         q = q.filter(Job.source.in_(vals)) if len(vals) > 1 else q.filter(Job.source == vals[0])
+    if origin == "external":
+        q = q.filter(Job.externally_added_at.isnot(None))
+    elif origin == "discovered":
+        q = q.filter(Job.externally_added_at.is_(None))
     if saved is not None:
         q = q.filter(Job.saved == saved)
     if title_search:
@@ -490,7 +495,7 @@ def _arrangement_clause(raw):
 def _apply_common_filters(q, status=None, company=None, source=None, h1b_verdict=None,
                           min_score=None, saved=None, title_search=None, remote=None,
                           min_salary=None, max_salary=None, search_id=None,
-                          location=None, arrangement=None, since_days=None, job_ids=None):
+                          location=None, arrangement=None, since_days=None, job_ids=None, origin=None):
     """Apply shared filter logic for job list and filter-list endpoints."""
     if status:
         vals = [s.strip() for s in status.split(",") if s.strip()]
@@ -502,6 +507,10 @@ def _apply_common_filters(q, status=None, company=None, source=None, h1b_verdict
     if source:
         vals = [s.strip() for s in source.split(",") if s.strip()]
         q = q.filter(Job.source.in_(vals)) if len(vals) > 1 else q.filter(Job.source == vals[0])
+    if origin == "external":
+        q = q.filter(Job.externally_added_at.isnot(None))
+    elif origin == "discovered":
+        q = q.filter(Job.externally_added_at.is_(None))
     if h1b_verdict:
         vals = [v.strip() for v in h1b_verdict.split(",") if v.strip()]
         q = q.filter(Job.h1b_verdict.in_(vals)) if len(vals) > 1 else q.filter(Job.h1b_verdict == vals[0])
@@ -679,6 +688,7 @@ def job_facets(
     status: Optional[str] = None,
     company: Optional[str] = None,
     source: Optional[str] = None,
+    origin: Optional[str] = Query(None, pattern="^(discovered|external)$"),
     h1b_verdict: Optional[str] = None,
     min_score: Optional[int] = None,
     saved: Optional[bool] = None,
@@ -720,7 +730,7 @@ def job_facets(
     under it.
     """
     expanded = _expand_company_filter(db, company)
-    base = dict(status=status, company=expanded, source=source, h1b_verdict=h1b_verdict,
+    base = dict(status=status, company=expanded, source=source, origin=origin, h1b_verdict=h1b_verdict,
                 min_score=min_score, saved=saved, title_search=title_search, remote=remote, location=location, arrangement=arrangement,
                 min_salary=min_salary, max_salary=max_salary, search_id=search_id, since_days=since_days)
     analyses = _latest_analyses(db)
@@ -981,6 +991,7 @@ async def save_from_extension(body: dict, db: Session = Depends(get_db)):
         (Job.external_id == external_id) | (Job.content_hash == content_hash)
     ).first()
     if existing:
+        existing.externally_added_at = existing.externally_added_at or utcnow()
         if existing.status == "skip":
             existing.status = "new"
         # Backfill description if missing — share salary fallback shape with insert path.
@@ -1038,6 +1049,7 @@ async def save_from_extension(body: dict, db: Session = Depends(get_db)):
         url=url,
         description=description,
         source="extension",
+        externally_added_at=utcnow(),
         search_id=ext_search.id if ext_search else None,
         status="new",
     )
@@ -1138,6 +1150,8 @@ def create_manual_job(body: dict, background_tasks: BackgroundTasks, db: Session
     if existing:
         # Report the row, change nothing: an `applied` or `ignored` posting must
         # not fall back to `new` because the user pasted its URL a second time.
+        existing.externally_added_at = existing.externally_added_at or utcnow()
+        db.commit()
         return {"id": str(existing.id), "created": False, "status": existing.status}
 
     job = Job(
@@ -1147,6 +1161,8 @@ def create_manual_job(body: dict, background_tasks: BackgroundTasks, db: Session
         title=title,
         url=url,
         source="manual",   # same marker the hand-logged application path uses
+        externally_added_at=utcnow(),
+        description=str_field(body, "description") or None,
         status=status,
         location=str_field(body, "location") or None,
         # `saved` and status='saved' move together everywhere else in the feed.
@@ -1169,6 +1185,47 @@ def create_manual_job(body: dict, background_tasks: BackgroundTasks, db: Session
     background_tasks.add_task(_fetch_and_store_description, str(job.id), url)
 
     return {"id": str(job.id), "created": True, "status": job.status}
+
+
+@router.post("/external")
+async def add_external_job(body: dict, db: Session = Depends(get_db)):
+    """Add a posting by URL, enriching obvious metadata before normal dedup."""
+    url = str_field(body, "url")
+    if not url:
+        raise HTTPException(400, "url is required")
+    title, company = str_field(body, "title"), str_field(body, "company")
+    description = str_field(body, "description")
+    if not title or not company:
+        try:
+            import httpx
+            from bs4 import BeautifulSoup
+            async with httpx.AsyncClient(follow_redirects=True, timeout=10, headers={"User-Agent": "JobNavigator/1.0"}) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+            soup = BeautifulSoup(response.text, "html.parser")
+            def meta(name):
+                node = soup.find("meta", attrs={"property": name}) or soup.find("meta", attrs={"name": name})
+                return str(node.get("content") or "").strip() if node else ""
+            title = title or meta("og:title") or (soup.title.get_text(" ", strip=True) if soup.title else "")
+            company = company or meta("og:site_name")
+            description = description or meta("og:description") or meta("description")
+        except Exception as e:
+            raise HTTPException(502, f"Could not fetch posting: {e}")
+    missing = [key for key, value in (("title", title), ("company", company)) if not value]
+    if missing:
+        raise HTTPException(422, {"message": "More details are needed", "missing_fields": missing})
+    from fastapi import BackgroundTasks as _BackgroundTasks
+    result = create_manual_job({**body, "url": url, "title": title, "company": company, "description": description}, _BackgroundTasks(), db)
+    job = db.get(Job, result["id"])
+    if job is not None and job.status not in ("ignored", "skip"):
+        # Gate is cheap and deterministic; Candidate Fit is queued only when
+        # the existing automatic-analysis policy is enabled.
+        from backend.discovery.engine import gate_jobs, queue_candidate_fit
+        gate_jobs(db, [job])
+        if job.gate_ok:
+            queue_candidate_fit(db, limit=1)
+        result["gate_ok"] = job.gate_ok
+    return result
 
 
 # Column types for the three fields both job writers accept. Without this a
@@ -1501,6 +1558,8 @@ def _job_to_dict(j: Job, tailored_resume_id=None, in_flight: list[str] | None = 
         "canonical_url": j.canonical_url,
         "apply_url": j.apply_url,
         "source": j.source,
+        "externally_added": j.externally_added_at is not None,
+        "externally_added_at": j.externally_added_at.isoformat() if j.externally_added_at else None,
         "search_id": str(j.search_id) if j.search_id else None,
         "description": j.description,
         "description_source": j.description_source,
